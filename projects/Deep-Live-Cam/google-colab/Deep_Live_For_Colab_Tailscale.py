@@ -217,7 +217,8 @@ import numpy as np
 
 
 class RemoteSwapServer:
-    def __init__(self, host="127.0.0.1", timeout_ms=5000, chunk_bytes=4 * 1024 * 1024):
+    def __init__(self, client_ip=None, host="0.0.0.0", timeout_ms=5000, chunk_bytes=4 * 1024 * 1024):
+        self.client_ip = client_ip  # Windows client Tailscale IP
         self.host = host
         self.timeout_ms = timeout_ms
         self.chunk_bytes = chunk_bytes
@@ -245,6 +246,15 @@ class RemoteSwapServer:
         socket.setsockopt(zmq.RCVTIMEO, self.timeout_ms)
         socket.setsockopt(zmq.SNDTIMEO, self.timeout_ms)
         socket.bind(f"tcp://{self.host}:{port}")
+        return socket
+
+    def _connect_socket(self, socket_type, address):
+        """Connect to remote address instead of binding."""
+        socket = self.context.socket(socket_type)
+        socket.setsockopt(zmq.LINGER, 0)
+        socket.setsockopt(zmq.RCVTIMEO, self.timeout_ms)
+        socket.setsockopt(zmq.SNDTIMEO, self.timeout_ms)
+        socket.connect(address)
         return socket
 
     @staticmethod
@@ -287,7 +297,11 @@ class RemoteSwapServer:
                     socket.close(0)
 
     def _send_result(self, result):
-        socket = self._socket(zmq.REQ, 5557)
+        if not self.client_ip:
+            raise ValueError("client_ip not set; cannot send results")
+
+        result_address = f"tcp://{self.client_ip}:5557"
+        socket = self._connect_socket(zmq.REQ, result_address)
         try:
             result = np.ascontiguousarray(result)
             payload = memoryview(result).cast("B")
@@ -306,7 +320,7 @@ class RemoteSwapServer:
                 socket.recv_string()
             socket.send(b"END")
             socket.recv_string()
-            print(f"Returned result: {result.shape} in {total_chunks} chunk(s)")
+            print(f"Returned result to {result_address}: {result.shape} in {total_chunks} chunk(s)")
         finally:
             socket.close(0)
 
@@ -360,15 +374,19 @@ class RemoteSwapServer:
             "result_thread": bool(len(self.threads) > 2 and self.threads[2].is_alive()),
             "source_queue": self.source_queue.qsize(),
             "target_queue": self.target_queue.qsize(),
+            "client_ip": self.client_ip,
         }
         print(status)
         return status
 
 print("Restartable ZMQ server defined")
 
-# %% [code] cell=9 id=start-server
+# %% [code] cell=9 id=start-server meta_b64=eyJjZWxsVmlldyI6ImZvcm0ifQ==
 """CELL: Start or reset remote server"""
 # @title Start or reset remote server
+# @markdown Enter the Windows client Tailscale IP address:
+WINDOWS_CLIENT_IP = "100.66.31.105"  # @param {type:"string"}
+
 try:
     REMOTE_SERVER.stop()
 except (NameError, AttributeError):
@@ -378,7 +396,7 @@ try:
 except (NameError, AttributeError):
     pass
 
-REMOTE_SERVER = RemoteSwapServer()
+REMOTE_SERVER = RemoteSwapServer(client_ip=WINDOWS_CLIENT_IP)
 REMOTE_SERVER.start()
 
 # %% [markdown] cell=10 id=live-notes
