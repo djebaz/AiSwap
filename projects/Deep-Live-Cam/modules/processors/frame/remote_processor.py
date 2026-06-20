@@ -30,15 +30,11 @@ def push_socket(address) -> zmq.Socket:
     sender_sock.connect(address)
     return sender_sock
 def pull_socket(address) -> zmq.Socket:
-    # Extract port from address (e.g., "tcp://100.75.73.49:5557" -> "5557")
-    port = address.split(':')[-1]
-    local_address = f'tcp://0.0.0.0:{port}'
-    receiver_sock = context.socket(zmq.REP)
+    receiver_sock = context.socket(zmq.DEALER)
     receiver_sock.setsockopt(zmq.LINGER, 0)
     receiver_sock.setsockopt(zmq.RCVTIMEO, SOCKET_TIMEOUT_MS)
     receiver_sock.setsockopt(zmq.SNDTIMEO, SOCKET_TIMEOUT_MS)
-    receiver_sock.bind(local_address)
-    print(f"[{NAME}] Listening for results on {local_address}")
+    receiver_sock.connect(address)
     return receiver_sock
 
 def pre_check() -> bool:
