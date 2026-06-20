@@ -2,7 +2,7 @@ import os
 import sys
 # single thread doubles cuda performance - needs to be set before torch import
 if any(arg.startswith('--execution-provider') for arg in sys.argv):
-    os.environ['OMP_NUM_THREADS'] = '6'
+    os.environ['OMP_NUM_THREADS'] = '1'
 # reduce tensorflow log level
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 import warnings
@@ -11,54 +11,84 @@ import platform
 import signal
 import shutil
 import argparse
-try:
-    import torch
-    HAS_TORCH = True
-except ImportError:
-    HAS_TORCH = False
+import atexit
+import tempfile
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
+import torch
 import onnxruntime
-try:
-    import tensorflow
-    HAS_TENSORFLOW = True
-except ImportError:
-    HAS_TENSORFLOW = False
 
 import modules.globals
 import modules.metadata
 import modules.ui as ui
-from modules.processors.frame.core import get_frame_processors_modules, process_video_in_memory
+from modules.processors.frame.core import get_frame_processors_modules
 from modules.utilities import has_image_extension, is_image, is_video, detect_fps, create_video, extract_frames, get_temp_frame_paths, restore_audio, create_temp, move_temp, clean_temp, normalize_output_path
 
-if HAS_TORCH and 'ROCMExecutionProvider' in modules.globals.execution_providers:
+if 'ROCMExecutionProvider' in modules.globals.execution_providers:
     del torch
 
 warnings.filterwarnings('ignore', category=FutureWarning, module='insightface')
-if HAS_TORCH:
-    warnings.filterwarnings('ignore', category=UserWarning, module='torchvision')
+warnings.filterwarnings('ignore', category=UserWarning, module='torchvision')
+
+TEMP_URL_INPUTS: List[str] = []
+
+
+def resolve_cli_input(input_path: str, label: str) -> str:
+    if not input_path or urlparse(input_path).scheme not in ('http', 'https'):
+        return input_path
+
+    suffix = os.path.splitext(urlparse(input_path).path)[1].lower()
+    if suffix not in ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'):
+        suffix = '.jpg'
+    file_descriptor, temporary_path = tempfile.mkstemp(prefix=f'dlc-{label}-', suffix=suffix)
+    os.close(file_descriptor)
+    try:
+        request = Request(input_path, headers={'User-Agent': 'Deep-Live-Cam'})
+        with urlopen(request, timeout=60) as response, open(temporary_path, 'wb') as output_file:
+            shutil.copyfileobj(response, output_file)
+        if os.path.getsize(temporary_path) == 0:
+            raise ValueError('downloaded file is empty')
+    except Exception:
+        os.unlink(temporary_path)
+        raise
+    TEMP_URL_INPUTS.append(temporary_path)
+    print(f'Downloaded {label} URL to {temporary_path}')
+    return temporary_path
+
+
+@atexit.register
+def clean_url_inputs() -> None:
+    for temporary_path in TEMP_URL_INPUTS:
+        try:
+            os.unlink(temporary_path)
+        except FileNotFoundError:
+            pass
 
 
 def parse_args() -> None:
     signal.signal(signal.SIGINT, lambda signal_number, frame: destroy())
     program = argparse.ArgumentParser()
-    program.add_argument('-s', '--source', help='select an source image', dest='source_path')
-    program.add_argument('-t', '--target', help='select an target image or video', dest='target_path')
+    program.add_argument('-s', '--source', help='select a source image path or HTTP(S) URL', dest='source_path')
+    program.add_argument('-t', '--target', help='select a target image/video path or HTTP(S) image URL', dest='target_path')
     program.add_argument('-o', '--output', help='select output file or directory', dest='output_path')
-    program.add_argument('--frame-processor', help='pipeline of frame processors', dest='frame_processor', default=['face_swapper'], choices=['face_swapper', 'face_enhancer', 'face_enhancer_gpen256', 'face_enhancer_gpen512'], nargs='+')
+    program.add_argument('--frame-processor', help='pipeline of frame processors', dest='frame_processor', default=['face_swapper'], choices=['face_swapper', 'face_enhancer','remote_processor'], nargs='+')
     program.add_argument('--keep-fps', help='keep original fps', dest='keep_fps', action='store_true', default=False)
     program.add_argument('--keep-audio', help='keep original audio', dest='keep_audio', action='store_true', default=True)
     program.add_argument('--keep-frames', help='keep temporary frames', dest='keep_frames', action='store_true', default=False)
     program.add_argument('--many-faces', help='process every face', dest='many_faces', action='store_true', default=False)
-    program.add_argument('--nsfw-filter', help='filter the NSFW image or video', dest='nsfw_filter', action='store_true', default=False)
-    program.add_argument('--map-faces', help='map source target faces', dest='map_faces', action='store_true', default=False)
-    program.add_argument('--mouth-mask', help='mask the mouth region', dest='mouth_mask', action='store_true', default=False)
     program.add_argument('--video-encoder', help='adjust output video encoder', dest='video_encoder', default='libx264', choices=['libx264', 'libx265', 'libvpx-vp9'])
     program.add_argument('--video-quality', help='adjust output video quality', dest='video_quality', type=int, default=18, choices=range(52), metavar='[0-51]')
-    program.add_argument('-l', '--lang', help='Ui language', default="en")
-    program.add_argument('--live-mirror', help='The live camera display as you see it in the front-facing camera frame', dest='live_mirror', action='store_true', default=False)
-    program.add_argument('--live-resizable', help='The live camera frame is resizable', dest='live_resizable', action='store_true', default=False)
     program.add_argument('--max-memory', help='maximum amount of RAM in GB', dest='max_memory', type=int, default=suggest_max_memory())
-    program.add_argument('--execution-provider', help='execution provider', dest='execution_provider', default=[suggest_default_execution_provider()], choices=suggest_execution_providers(), nargs='+')
+    program.add_argument('--execution-provider', help='execution provider', dest='execution_provider', default=['cpu'], choices=suggest_execution_providers(), nargs='+')
     program.add_argument('--execution-threads', help='number of execution threads', dest='execution_threads', type=int, default=suggest_execution_threads())
+    program.add_argument('--remote-host', help='remote processor host or Tailscale IP; uses ports 5555, 5556, and 5557', dest='remote_host')
+    program.add_argument('--remote-face-enhancer', help='run GFPGAN on the remote GPU after swapping', action='store_true')
+    program.add_argument('--live', help='use the physical webcam as input and a Windows virtual camera as output', action='store_true')
+    program.add_argument('--camera-index', help='physical webcam index', type=int, default=0)
+    program.add_argument('--virtual-camera', help='virtual camera device name, for example OBS Virtual Camera')
+    program.add_argument('--live-width', type=int, default=960)
+    program.add_argument('--live-height', type=int, default=540)
+    program.add_argument('--live-fps', type=int, default=30)
     program.add_argument('-v', '--version', action='version', version=f'{modules.metadata.name} {modules.metadata.version}')
 
     # register deprecated args
@@ -69,30 +99,49 @@ def parse_args() -> None:
 
     args = program.parse_args()
 
-    modules.globals.source_path = args.source_path
-    modules.globals.target_path = args.target_path
+    try:
+        modules.globals.source_path = resolve_cli_input(args.source_path, 'source')
+        modules.globals.target_path = resolve_cli_input(args.target_path, 'target')
+    except Exception as exception:
+        program.error(f'failed to download input URL: {exception}')
     modules.globals.output_path = normalize_output_path(modules.globals.source_path, modules.globals.target_path, args.output_path)
     modules.globals.frame_processors = args.frame_processor
-    modules.globals.headless = args.source_path or args.target_path or args.output_path
+    modules.globals.headless = bool(args.source_path or args.target_path or args.output_path or args.live)
     modules.globals.keep_fps = args.keep_fps
     modules.globals.keep_audio = args.keep_audio
     modules.globals.keep_frames = args.keep_frames
     modules.globals.many_faces = args.many_faces
-    modules.globals.mouth_mask = args.mouth_mask
-    modules.globals.nsfw_filter = args.nsfw_filter
-    modules.globals.map_faces = args.map_faces
     modules.globals.video_encoder = args.video_encoder
     modules.globals.video_quality = args.video_quality
-    modules.globals.live_mirror = args.live_mirror
-    modules.globals.live_resizable = args.live_resizable
     modules.globals.max_memory = args.max_memory
     modules.globals.execution_providers = decode_execution_providers(args.execution_provider)
     modules.globals.execution_threads = args.execution_threads
-    modules.globals.lang = args.lang
+    modules.globals.remote_face_enhancer = args.remote_face_enhancer
+    modules.globals.live_mode = args.live
+    modules.globals.camera_index = args.camera_index
+    modules.globals.virtual_camera = args.virtual_camera
+    modules.globals.live_width = args.live_width
+    modules.globals.live_height = args.live_height
+    modules.globals.live_fps = args.live_fps
+    if args.remote_host:
+        remote_host = args.remote_host.removeprefix('tcp://').rstrip('/')
+        modules.globals.push_addr = f'tcp://{remote_host}:5555'
+        modules.globals.push_addr_two = f'tcp://{remote_host}:5556'
+        modules.globals.pull_addr = f'tcp://{remote_host}:5557'
 
-    #for ENHANCER tumblers:
-    for enhancer_key in ('face_enhancer', 'face_enhancer_gpen256', 'face_enhancer_gpen512'):
-        modules.globals.fp_ui[enhancer_key] = enhancer_key in args.frame_processor
+    #for ENHANCER tumbler:
+    if 'face_enhancer' in args.frame_processor:
+        modules.globals.fp_ui['face_enhancer'] = True
+    else:
+        modules.globals.fp_ui['face_enhancer'] = False
+        #for Remote tumbler:
+    if 'remote_processor' in args.frame_processor:
+        modules.globals.fp_ui['remote_processor'] = True
+    else:
+        modules.globals.fp_ui['remote_processor'] = False
+    # The local TensorFlow/OpenNSFW check is disabled. This also allows the
+    # remote-processing client to run on CPUs without AVX support.
+    modules.globals.nsfw = True
 
     # translate deprecated args
     if args.source_path_deprecated:
@@ -131,46 +180,24 @@ def suggest_max_memory() -> int:
     return 16
 
 
-def suggest_default_execution_provider() -> str:
-    """Pick the best available provider: cuda > rocm > coreml > dml > cpu."""
-    available = encode_execution_providers(onnxruntime.get_available_providers())
-    for pref in ('cuda', 'rocm', 'coreml', 'dml'):
-        if pref in available:
-            return pref
-    return 'cpu'
-
-
 def suggest_execution_providers() -> List[str]:
     return encode_execution_providers(onnxruntime.get_available_providers())
 
 
 def suggest_execution_threads() -> int:
-    """Suggest optimal thread count based on hardware and execution provider."""
-    import os
-    
-    # Get CPU count
-    cpu_count = os.cpu_count() or 4
-    
     if 'DmlExecutionProvider' in modules.globals.execution_providers:
         return 1
     if 'ROCMExecutionProvider' in modules.globals.execution_providers:
         return 1
-    if 'CUDAExecutionProvider' in modules.globals.execution_providers:
-        return 2
-    
-    # For CPU execution, use most cores but leave some for system
-    return max(4, min(cpu_count - 2, 16))
+    return 8
 
 
 def limit_resources() -> None:
-    # prevent tensorflow memory leak
-    if HAS_TENSORFLOW:
-        gpus = tensorflow.config.experimental.list_physical_devices('GPU')
-        for gpu in gpus:
-            tensorflow.config.experimental.set_memory_growth(gpu, True)
     # limit memory usage
     if modules.globals.max_memory:
         memory = modules.globals.max_memory * 1024 ** 3
+        if platform.system().lower() == 'darwin':
+            memory = modules.globals.max_memory * 1024 ** 6
         if platform.system().lower() == 'windows':
             import ctypes
             kernel32 = ctypes.windll.kernel32
@@ -181,7 +208,7 @@ def limit_resources() -> None:
 
 
 def release_resources() -> None:
-    if 'CUDAExecutionProvider' in modules.globals.execution_providers and HAS_TORCH:
+    if 'CUDAExecutionProvider' in modules.globals.execution_providers:
         torch.cuda.empty_cache()
 
 
@@ -201,104 +228,64 @@ def update_status(message: str, scope: str = 'DLC.CORE') -> None:
         ui.update_status(message)
 
 def start() -> None:
-    """Start processing with performance monitoring."""
-    import time
-    
-    start_time = time.time()
-    
+    if modules.globals.live_mode:
+        if 'remote_processor' not in modules.globals.frame_processors:
+            update_status('Live virtual-camera mode requires remote_processor.')
+            return
+        from modules.processors.frame import remote_processor
+        remote_processor.run_live_virtual_camera(modules.globals.source_path)
+        return
     for frame_processor in get_frame_processors_modules(modules.globals.frame_processors):
         if not frame_processor.pre_start():
             return
-    update_status('Processing...')
-    
     # process image to image
     if has_image_extension(modules.globals.target_path):
-        if modules.globals.nsfw_filter and ui.check_and_ignore_nsfw(modules.globals.target_path, destroy):
-            return
-        try:
-            shutil.copy2(modules.globals.target_path, modules.globals.output_path)
-        except Exception as e:
-            print("Error copying file:", str(e))
+        if modules.globals.nsfw == False:
+            from modules.predicter import predict_image
+            if predict_image(modules.globals.target_path):
+                destroy()
+        shutil.copy2(modules.globals.target_path, modules.globals.output_path)
         for frame_processor in get_frame_processors_modules(modules.globals.frame_processors):
             update_status('Progressing...', frame_processor.NAME)
             frame_processor.process_image(modules.globals.source_path, modules.globals.output_path, modules.globals.output_path)
             release_resources()
         if is_image(modules.globals.target_path):
-            elapsed = time.time() - start_time
-            update_status(f'Processing to image succeed! (Time: {elapsed:.2f}s)')
+            update_status('Processing to image succeed!')
         else:
             update_status('Processing to image failed!')
         return
-    
     # process image to videos
-    if modules.globals.nsfw_filter and ui.check_and_ignore_nsfw(modules.globals.target_path, destroy):
-        return
+    if modules.globals.nsfw == False:
+        from modules.predicter import predict_video
+        if predict_video(modules.globals.target_path):
+            destroy()
+    print("modules.globals.frame_processors",modules.globals.frame_processors)
+    update_status('Creating temp resources...')
+    create_temp(modules.globals.target_path)
+    update_status('Extracting frames...')
+    extract_frames(modules.globals.target_path)
+    temp_frame_paths = get_temp_frame_paths(modules.globals.target_path)
 
-    # Detect FPS early (needed by both pipelines)
-    if modules.globals.keep_fps:
-        update_status('Detecting fps...')
-        fps = detect_fps(modules.globals.target_path)
+    if 'remote_processor' in modules.globals.frame_processors :
+        for frame_processor in get_frame_processors_modules(modules.globals.frame_processors):
+            print("Procesor Name",frame_processor.__name__)
+            if frame_processor.__name__ =="modules.processors.frame.remote_processor":
+                update_status('Progressing...', frame_processor.NAME)
+                frame_processor.process_video(modules.globals.source_path, temp_frame_paths)
     else:
-        fps = 30.0
-
-    video_created = False
-
-    # --- In-memory pipeline (non-map_faces only) ---
-    # Reads frames from FFmpeg pipe, processes in memory, encodes directly.
-    # Eliminates all per-frame PNG disk I/O for a major speed-up.
-    if not modules.globals.map_faces:
-        update_status(f'Processing video in-memory at {fps} fps...')
-        create_temp(modules.globals.target_path)
-
-        processing_start = time.time()
-        video_created = process_video_in_memory(
-            modules.globals.source_path,
-            modules.globals.target_path,
-            fps,
-        )
-        processing_time = time.time() - processing_start
-        release_resources()
-
-        if video_created:
-            update_status(f'In-memory processing + encoding completed in {processing_time:.2f}s')
-
-    # --- Disk-based fallback (required for map_faces, or if pipe failed) ---
-    if not video_created:
-        if not modules.globals.map_faces:
-            update_status('Falling back to disk-based processing...')
-
-        extraction_start = time.time()
-        if not modules.globals.map_faces:
-            create_temp(modules.globals.target_path)
-            update_status('Extracting frames...')
-            extract_frames(modules.globals.target_path)
-        extraction_time = time.time() - extraction_start
-
-        temp_frame_paths = get_temp_frame_paths(modules.globals.target_path)
-        total_frames = len(temp_frame_paths)
-        update_status(f'Processing {total_frames} frames with {modules.globals.execution_threads} threads...')
-
-        processing_start = time.time()
         for frame_processor in get_frame_processors_modules(modules.globals.frame_processors):
             update_status('Progressing...', frame_processor.NAME)
             frame_processor.process_video(modules.globals.source_path, temp_frame_paths)
             release_resources()
-        processing_time = time.time() - processing_start
-        fps_processing = total_frames / processing_time if processing_time > 0 else 0
-        update_status(f'Frame processing completed in {processing_time:.2f}s ({fps_processing:.2f} fps)')
-
-        encoding_start = time.time()
+    # handles fps
+    if modules.globals.keep_fps:
+        update_status('Detecting fps...')
+        fps = detect_fps(modules.globals.target_path)
         update_status(f'Creating video with {fps} fps...')
-        video_created = create_video(modules.globals.target_path, fps)
-        encoding_time = time.time() - encoding_start
-        if video_created:
-            update_status(f'Video encoding completed in {encoding_time:.2f}s')
-
-    if not video_created:
-        update_status('Video encoding failed. No temporary output video was created.')
-        clean_temp(modules.globals.target_path)
-        return
-    
+        create_video(modules.globals.target_path, fps)
+    else:
+        update_status('Creating video with 30.0 fps...')
+        create_video(modules.globals.target_path)
     # handle audio
     if modules.globals.keep_audio:
         if modules.globals.keep_fps:
@@ -308,22 +295,18 @@ def start() -> None:
         restore_audio(modules.globals.target_path, modules.globals.output_path)
     else:
         move_temp(modules.globals.target_path, modules.globals.output_path)
-    
     # clean and validate
     clean_temp(modules.globals.target_path)
-    
-    total_time = time.time() - start_time
-    if is_video(modules.globals.target_path) and modules.globals.output_path and os.path.isfile(modules.globals.output_path):
-        update_status(f'Video processing succeeded! Total time: {total_time:.2f}s')
+    if is_video(modules.globals.target_path):
+        update_status('Processing to video succeed!')
     else:
         update_status('Processing to video failed!')
 
 
-def destroy(to_quit=True) -> None:
+def destroy() -> None:
     if modules.globals.target_path:
         clean_temp(modules.globals.target_path)
-    if to_quit:
-        quit()
+    quit()
 
 
 def run() -> None:
@@ -333,12 +316,9 @@ def run() -> None:
     for frame_processor in get_frame_processors_modules(modules.globals.frame_processors):
         if not frame_processor.pre_check():
             return
-    # Pre-load face analyser in main thread before GUI starts
-    #from modules.face_analyser import get_face_analyser
-    #get_face_analyser()
     limit_resources()
     if modules.globals.headless:
         start()
     else:
-        window = ui.init(start, destroy, modules.globals.lang)
+        window = ui.init(start, destroy)
         window.mainloop()

@@ -7,7 +7,6 @@ __pycache__/
 *.log
 *.backup
 tf_env/
-*.png
 *.mp4
 *.mkv
 
@@ -16,16 +15,11 @@ temp/
 .venv/
 venv/
 env/
+googdeep/
 workflow/
+workenv/
 gfpgan/
 models/inswapper_128.onnx
 models/GFPGANv1.4.pth
 *.onnx
 models/DMDNet.pth
-faceswap/
-.vscode/
-switch_states.json
-/models
-install.bat
-/.claude
-*.bat
