@@ -1,6 +1,6 @@
 # Auto-generated from notebook; keep markers for round-trip
 # Markers + docstring headers are required for ipynb reconstruction
-# NOTEBOOK_META_B64=eyJjb2xhYiI6eyJjb2xsYXBzZWRfc2VjdGlvbnMiOlsib3ZlcnZpZXciLCJydW50aW1lIiwicmVzdGFydC1ub3RlIiwic2VydmVyLW5vdGVzIiwidGFpbHNjYWxlLW5vdGVzIiwid2luZG93cy11c2FnZSJdfSwia2VybmVsc3BlYyI6eyJuYW1lIjoicHl0aG9uMyIsImxhbmd1YWdlIjoicHl0aG9uIiwiZGlzcGxheV9uYW1lIjoiUHl0aG9uIDMifSwibGFuZ3VhZ2VfaW5mbyI6eyJuYW1lIjoicHl0aG9uIn0sIm5iZm9ybWF0Ijo0LCJuYmZvcm1hdF9taW5vciI6NX0=
+# NOTEBOOK_META_B64=eyJjb2xhYiI6eyJjb2xsYXBzZWRfc2VjdGlvbnMiOlsib3ZlcnZpZXciLCJydW50aW1lIiwicmVzdGFydC1ub3RlIiwic2VydmVyLW5vdGVzIiwidGFpbHNjYWxlLW5vdGVzIiwid2luZG93cy11c2FnZSJdfSwia2VybmVsc3BlYyI6eyJkaXNwbGF5X25hbWUiOiJQeXRob24gMyIsImxhbmd1YWdlIjoicHl0aG9uIiwibmFtZSI6InB5dGhvbjMifSwibGFuZ3VhZ2VfaW5mbyI6eyJuYW1lIjoicHl0aG9uIn0sIm5iZm9ybWF0Ijo0LCJuYmZvcm1hdF9taW5vciI6NX0=
 
 # %% [markdown] cell=0 id=overview
 """MARKDOWN
@@ -225,6 +225,7 @@ class RemoteSwapServer:
         self.stop_event = threading.Event()
         self.source_queue = queue.Queue(maxsize=1)
         self.target_queue = queue.Queue(maxsize=1)
+        self.startup_queue = queue.Queue()
         self.threads = []
 
     @staticmethod
@@ -264,27 +265,33 @@ class RemoteSwapServer:
         return array, metadata
 
     def _receive_loop(self, port, dtype_key, shape_key, destination, label):
-        while not self.stop_event.is_set():
-            socket = None
-            try:
-                socket = self._socket(zmq.REP, port)
-                while not self.stop_event.is_set():
-                    try:
-                        array, metadata = self._receive_array(socket, dtype_key, shape_key)
-                        self._put_latest(destination, (array, metadata))
-                        print(f"Received {label}: {array.shape}")
-                    except zmq.Again:
-                        continue
-                    except Exception as exception:
-                        print(f"Resetting {label} socket: {exception}")
-                        break
-            except zmq.ZMQError as exception:
-                if not self.stop_event.is_set():
-                    print(f"Unable to bind {label} port {port}: {exception}")
-                    time.sleep(1)
-            finally:
-                if socket is not None:
-                    socket.close(0)
+        socket = None
+        startup_reported = False
+        try:
+            socket = self._socket(zmq.REP, port)
+            poller = zmq.Poller()
+            poller.register(socket, zmq.POLLIN)
+            self.startup_queue.put((label, None))
+            startup_reported = True
+            while not self.stop_event.is_set():
+                if socket not in dict(poller.poll(500)):
+                    continue
+                try:
+                    array, metadata = self._receive_array(socket, dtype_key, shape_key)
+                    self._put_latest(destination, (array, metadata))
+                    print(f"Received {label}: {array.shape}")
+                except zmq.Again:
+                    continue
+                except Exception as exception:
+                    if not self.stop_event.is_set():
+                        print(f"Stopping {label} receiver after protocol error: {exception}")
+                    break
+        except zmq.ZMQError as exception:
+            if not startup_reported:
+                self.startup_queue.put((label, exception))
+        finally:
+            if socket is not None:
+                socket.close(0)
 
     def _send_result(self, result):
         socket = self._socket(zmq.REQ, 5557)
@@ -357,13 +364,35 @@ class RemoteSwapServer:
         ]
         for thread in self.threads:
             thread.start()
-        time.sleep(1)
+        startup = {}
+        try:
+            for _ in range(2):
+                label, error = self.startup_queue.get(timeout=5)
+                startup[label] = error
+        except queue.Empty as exception:
+            self.stop()
+            raise RuntimeError("Remote server startup timed out") from exception
+        failures = {label: error for label, error in startup.items() if error is not None}
+        if failures:
+            self.stop()
+            details = "; ".join(f"{label}: {error}" for label, error in failures.items())
+            raise RuntimeError(
+                f"Remote server could not claim its ports ({details}). "
+                "Stop the existing server or restart the Colab session."
+            )
+        print("Remote server listening on 127.0.0.1:5555 and 127.0.0.1:5556")
         return self.health()
 
     def stop(self):
         self.stop_event.set()
         for thread in self.threads:
-            thread.join(timeout=7)
+            thread.join(timeout=3)
+        alive = [thread.name for thread in self.threads if thread.is_alive()]
+        if alive:
+            raise RuntimeError(
+                f"Remote server did not stop cleanly ({', '.join(alive)}). "
+                "Wait for the active inference to finish or restart the Colab session."
+            )
 
     def health(self):
         status = {
