@@ -13,7 +13,7 @@ Highlights:
 - No Ngrok, FRP, public TCP endpoint, or payment-card verification.
 - Ports `5555`, `5556`, and `5557` remain private to your tailnet.
 - Restartable ZMQ workers recover from interrupted Windows clients.
-- Five-second socket timeouts prevent permanently wedged result threads.
+- Fifteen-second transport timeouts prevent permanently wedged result threads.
 - Four-megabyte chunks reduce round-trip overhead.
 
 Use this only with media you are authorized to process. The local NSFW detector was disabled in the companion Windows fork.
@@ -217,7 +217,7 @@ import numpy as np
 
 
 class RemoteSwapServer:
-    def __init__(self, host="127.0.0.1", timeout_ms=5000, chunk_bytes=4 * 1024 * 1024):
+    def __init__(self, host="127.0.0.1", timeout_ms=15000, chunk_bytes=4 * 1024 * 1024):
         self.host = host
         self.timeout_ms = timeout_ms
         self.chunk_bytes = chunk_bytes
@@ -310,6 +310,14 @@ class RemoteSwapServer:
         finally:
             socket.close(0)
 
+    def _send_error(self, exception):
+        socket = self._socket(zmq.REQ, 5557)
+        try:
+            socket.send_json({"status": "error", "error": str(exception)})
+            socket.recv_string()
+        finally:
+            socket.close(0)
+
     def _result_loop(self):
         while not self.stop_event.is_set():
             try:
@@ -332,6 +340,10 @@ class RemoteSwapServer:
             except Exception as exception:
                 print(f"Remote processing failed: {exception}")
                 traceback.print_exc()
+                try:
+                    self._send_error(exception)
+                except zmq.Again:
+                    print("Unable to return the processing error: Windows client is no longer waiting")
 
     def start(self):
         thread_specs = [

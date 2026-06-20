@@ -18,7 +18,8 @@ import queue
 NAME = 'DLC.REMOTE-PROCESSOR'
 
 context = zmq.Context()
-SOCKET_TIMEOUT_MS = 10_000  # 10 seconds for faster error detection
+SOCKET_TIMEOUT_MS = 15_000
+RESULT_TIMEOUT_MS = 120_000
 CHUNK_SIZE = 4 * 1024 * 1024
 
 # Socket to send messages on
@@ -29,11 +30,11 @@ def push_socket(address) -> zmq.Socket:
     sender_sock.setsockopt(zmq.SNDTIMEO, SOCKET_TIMEOUT_MS)
     sender_sock.connect(address)
     return sender_sock
-def pull_socket(address) -> zmq.Socket:
+def pull_socket(address, timeout_ms: int = SOCKET_TIMEOUT_MS) -> zmq.Socket:
     sender_sock = context.socket(zmq.REP)
     sender_sock.setsockopt(zmq.LINGER, 0)
-    sender_sock.setsockopt(zmq.RCVTIMEO, SOCKET_TIMEOUT_MS)
-    sender_sock.setsockopt(zmq.SNDTIMEO, SOCKET_TIMEOUT_MS)
+    sender_sock.setsockopt(zmq.RCVTIMEO, timeout_ms)
+    sender_sock.setsockopt(zmq.SNDTIMEO, timeout_ms)
     sender_sock.connect(address)
     return sender_sock
 
@@ -116,10 +117,19 @@ def send_temp_frame(temp_face: Frame)-> None:
         sender.close(0)
 
 def receive_processed_frame() -> Frame:
-    pull_socket_ = pull_socket(modules.globals.pull_addr)
+    pull_socket_ = pull_socket(modules.globals.pull_addr, RESULT_TIMEOUT_MS)
     try:
-        meta_data_json = pull_socket_.recv_json()
+        try:
+            meta_data_json = pull_socket_.recv_json()
+        except zmq.Again as exception:
+            raise TimeoutError(
+                f'Remote processor returned no result within {RESULT_TIMEOUT_MS // 1000} seconds. '
+                'Check the Colab server output for an inference or face-detection error.'
+            ) from exception
         print(meta_data_json)
+        if meta_data_json.get('status') == 'error':
+            pull_socket_.send_string("ACK")
+            raise RuntimeError(f"Remote processing failed: {meta_data_json.get('error', 'unknown error')}")
         total_chunk = meta_data_json['total_chunk']
         #num_data = meta_data_json['datasize']
         # Send acknowledgment for metadata
