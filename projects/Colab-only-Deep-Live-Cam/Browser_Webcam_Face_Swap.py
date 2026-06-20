@@ -26,9 +26,9 @@ This notebook captures your webcam directly in the browser, processes frames on 
 """CELL: %%capture"""
 %%capture
 !pip install huggingface_hub
-
 !pip install onnxruntime-gpu==1.20.1 #--extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/
 !pip install insightface #==0.7.3
+!pip install fastrtc
 # %% [markdown] cell=3 id=verify
 """MARKDOWN
 ## 2. Verify GPU
@@ -242,111 +242,43 @@ Press **Interrupt** (⏹️) to stop.
 """ENDMARKDOWN
 
 # %% [code] cell=14 id=continuous-stream
-"""CELL: from IPython.display import display, Javascript, HTML, clear_output"""
-from IPython.display import display, Javascript, HTML, clear_output
-from google.colab.output import eval_js
-from base64 import b64decode, b64encode
-import numpy as np
+"""CELL: from fastrtc import ("""
+from fastrtc import (
+    Stream,
+    VideoStreamHandler,
+    get_cloudflare_turn_credentials,
+    get_cloudflare_turn_credentials_async,
+)
 import cv2
-import PIL.Image
-import io
-import time
 
-# Optimized JS with persistence. We use a unique ID to avoid duplicates.
-JS_PERSISTENT = """
-(function() {
-  if (window.swapperInitialized) return;
+RTC_HF_TOKEN = userdata.get("HF_TOKEN")
+if not RTC_HF_TOKEN:
+    raise ValueError("Add HF_TOKEN to Colab Secrets and enable notebook access.")
 
-  window.startWebcam = async function(width, height) {
-    if (window.stream) { window.stopWebcam(); }
-    window.video = document.createElement('video');
-    window.video.style.display = 'none';
-    window.video.width = width;
-    window.video.height = height;
+async def get_rtc_credentials():
+    return await get_cloudflare_turn_credentials_async(
+        hf_token=RTC_HF_TOKEN,
+        ttl=3600,
+    )
 
-    window.stream = await navigator.mediaDevices.getUserMedia({video: {width: width, height: height}});
-    window.video.srcObject = window.stream;
-    await window.video.play();
+def process_stream_frame(rgb_frame):
+    """Apply face swapping to one FastRTC RGB webcam frame."""
+    bgr_frame = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2BGR)
+    result = swap_face(SOURCE_FACE, bgr_frame)
+    return cv2.cvtColor(result, cv2.COLOR_BGR2RGB)
 
-    window.canvas = document.createElement('canvas');
-    window.canvas.width = window.video.videoWidth;
-    window.canvas.height = window.video.videoHeight;
-    return [window.video.videoWidth, window.video.videoHeight];
-  };
+stream = Stream(
+    handler=VideoStreamHandler(process_stream_frame, skip_frames=True),
+    modality="video",
+    mode="send-receive",
+    rtc_configuration=get_rtc_credentials,
+    server_rtc_configuration=get_cloudflare_turn_credentials(
+        hf_token=RTC_HF_TOKEN,
+        ttl=3600,
+    ),
+)
 
-  window.captureFrame = async function(quality) {
-    if (!window.canvas) return null;
-    window.canvas.getContext('2d').drawImage(window.video, 0, 0);
-    return window.canvas.toDataURL('image/jpeg', quality);
-  };
-
-  window.stopWebcam = function() {
-    if (window.stream) {
-      window.stream.getTracks().forEach(track => track.stop());
-      if (window.video) window.video.remove();
-      window.stream = null;
-    }
-  };
-
-  window.swapperInitialized = true;
-})();
-"""
-
-# Clear previous output but ensure JS is injected in a way that survives
-display(Javascript(JS_PERSISTENT))
-
-try:
-    width, height = 480, 360
-    eval_js(f'window.startWebcam({width}, {height})')
-    time.sleep(2)
-
-    # Use a fixed display handle to avoid clearing the whole cell output (including JS)
-    display_handle = display(HTML("Initializing display..."), display_id=True)
-
-    print("Streaming started. Press Stop (■) to end.")
-
-    frame_count = 0
-    start_time = time.time()
-
-    while True:
-        data_url = eval_js('window.captureFrame(0.4)')
-        if not data_url:
-            continue
-
-        binary = b64decode(data_url.split(',')[1])
-        img_array = np.frombuffer(binary, dtype=np.uint8)
-        frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-
-        if frame is None: continue
-
-        # Process frame
-        result = swap_face(SOURCE_FACE, frame)
-
-        # Encode
-        _, buffer = cv2.imencode('.jpg', result, [cv2.IMWRITE_JPEG_QUALITY, 70])
-        encoded = b64encode(buffer).decode('utf-8')
-
-        # Update existing display handle instead of clear_output
-        fps = (frame_count + 1) / (time.time() - start_time)
-        html_content = f'''
-        <div style="font-family: monospace;">FPS: {fps:.1f} | Frames: {frame_count}</div>
-        <img src="data:image/jpeg;base64,{encoded}" style="width: {width}px;">
-        '''
-        display_handle.update(HTML(html_content))
-
-        frame_count += 1
-
-except KeyboardInterrupt:
-    print("
-Stopping...")
-except Exception as e:
-    print(f"
-Error: {e}")
-finally:
-    try:
-        eval_js('window.stopWebcam()')
-    except: pass
-    print("Webcam released.")
+stream.ui.launch(share=True)
 # %% [markdown] cell=15 id=notes
 """MARKDOWN
 ## Notes
