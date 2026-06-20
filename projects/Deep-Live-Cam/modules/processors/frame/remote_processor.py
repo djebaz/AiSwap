@@ -18,7 +18,7 @@ import queue
 NAME = 'DLC.REMOTE-PROCESSOR'
 
 context = zmq.Context()
-SOCKET_TIMEOUT_MS = 120_000
+SOCKET_TIMEOUT_MS = 10_000  # 10 seconds for faster error detection
 CHUNK_SIZE = 4 * 1024 * 1024
 
 # Socket to send messages on
@@ -30,12 +30,12 @@ def push_socket(address) -> zmq.Socket:
     sender_sock.connect(address)
     return sender_sock
 def pull_socket(address) -> zmq.Socket:
-    receiver_sock = context.socket(zmq.DEALER)
-    receiver_sock.setsockopt(zmq.LINGER, 0)
-    receiver_sock.setsockopt(zmq.RCVTIMEO, SOCKET_TIMEOUT_MS)
-    receiver_sock.setsockopt(zmq.SNDTIMEO, SOCKET_TIMEOUT_MS)
-    receiver_sock.connect(address)
-    return receiver_sock
+    sender_sock = context.socket(zmq.REP)
+    sender_sock.setsockopt(zmq.LINGER, 0)
+    sender_sock.setsockopt(zmq.RCVTIMEO, SOCKET_TIMEOUT_MS)
+    sender_sock.setsockopt(zmq.SNDTIMEO, SOCKET_TIMEOUT_MS)
+    sender_sock.connect(address)
+    return sender_sock
 
 def pre_check() -> bool:
     if not modules.globals.push_addr and not modules.globals.pull_addr:
