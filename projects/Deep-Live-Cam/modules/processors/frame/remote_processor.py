@@ -211,8 +211,11 @@ def run_live_virtual_camera(source_path: str, stop_event: threading.Event = None
     stream_out = stream_in = None
     try:
         send_source_frame(source)
+        print("Waiting for Colab server to start ffmpeg listeners...")
+        time.sleep(10)  # Give Colab time to start ffmpeg on ports 5556/5557
+
         stream_out = send_streams(cap)
-        stream_in = recieve_streams(cap)
+
         device = modules.globals.virtual_camera
         camera_options = {'device': device} if device else {}
         with pyvirtualcam.Camera(
@@ -224,7 +227,13 @@ def run_live_virtual_camera(source_path: str, stop_event: threading.Event = None
             **camera_options,
         ) as virtual_cam:
             print(f'Virtual camera ready: {virtual_cam.device} ({virtual_cam.backend})')
-            print('Use that camera in Zoom/Discord/Teams/OBS. Press Ctrl+C to stop.')
+
+            # Start receiving stream (Colab will start sending once it gets frames)
+            stream_in = recieve_streams(cap)
+
+            print('Streaming started! Use OBS Virtual Camera in Zoom/Discord/Teams/OBS. Press Ctrl+C to stop.')
+
+            # Main loop - send and receive frames continuously
             while not stop_event.is_set():
                 ok, frame = cap.read()
                 if not ok:
