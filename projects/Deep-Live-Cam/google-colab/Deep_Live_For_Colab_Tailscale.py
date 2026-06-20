@@ -160,10 +160,31 @@ def enhance_face(frame, face):
     return (pasted * mask[..., None] + frame * (1.0 - mask[..., None])).astype(np.uint8)
 
 
+_CACHED_SOURCE_FACE = None
+_SOURCE_CACHE_LOCK = threading.Lock()
+
+
+def cache_source_face(source_frame):
+    """Cache the detected source face to avoid repeated analysis."""
+    global _CACHED_SOURCE_FACE
+    with _SOURCE_CACHE_LOCK:
+        _CACHED_SOURCE_FACE = get_one_face(source_frame)
+        if _CACHED_SOURCE_FACE is None:
+            raise ValueError("No face detected in the source image")
+    return _CACHED_SOURCE_FACE
+
+
+def get_cached_source_face():
+    """Retrieve the cached source face."""
+    with _SOURCE_CACHE_LOCK:
+        return _CACHED_SOURCE_FACE
+
+
 def process_frame(source_frame, target_frame, many_faces=False, enhance=False):
-    source_face = get_one_face(source_frame)
+    # Cache source face on first call or when source changes
+    source_face = get_cached_source_face()
     if source_face is None:
-        raise ValueError("No face detected in the source image")
+        source_face = cache_source_face(source_frame)
 
     target_faces = get_faces(target_frame)
     if not target_faces:
@@ -207,6 +228,7 @@ Running the **Start or reset remote server** cell safely replaces any prior work
 # %% [code] cell=8 id=server-implementation
 """CELL: Define restartable ZMQ server"""
 # @title Define restartable ZMQ server
+import json
 import math
 import queue
 import threading
@@ -217,10 +239,9 @@ import numpy as np
 
 
 class RemoteSwapServer:
-    def __init__(self, host="127.0.0.1", timeout_ms=15000, chunk_bytes=4 * 1024 * 1024):
+    def __init__(self, host="127.0.0.1", timeout_ms=15000):
         self.host = host
         self.timeout_ms = timeout_ms
-        self.chunk_bytes = chunk_bytes
         self.context = zmq.Context.instance()
         self.stop_event = threading.Event()
         self.source_queue = queue.Queue(maxsize=1)
@@ -250,16 +271,13 @@ class RemoteSwapServer:
 
     @staticmethod
     def _receive_array(socket, dtype_key, shape_key):
-        metadata = socket.recv_json()
-        total_chunks = int(metadata["total_chunk"])
+        """Receive image via single multipart ZMQ message (metadata + bytes)."""
+        multipart = socket.recv_multipart()
+        if len(multipart) != 2:
+            raise RuntimeError(f"Expected 2-part message, got {len(multipart)}")
+        metadata = json.loads(multipart[0])
+        payload = multipart[1]
         socket.send_string("ACK")
-        payload = bytearray()
-        for index in range(total_chunks):
-            payload.extend(socket.recv())
-            socket.send_string(f"ACK {index + 1}/{total_chunks}")
-        if socket.recv() != b"END":
-            raise RuntimeError("Missing END marker")
-        socket.send_string("Final ACK")
         array = np.frombuffer(payload, dtype=np.dtype(metadata[dtype_key]))
         array = array.reshape(metadata[shape_key]).copy()
         return array, metadata
@@ -294,26 +312,20 @@ class RemoteSwapServer:
                 socket.close(0)
 
     def _send_result(self, result):
+        """Send result via single multipart ZMQ message (metadata + bytes)."""
         socket = self._socket(zmq.REQ, 5557)
         try:
             result = np.ascontiguousarray(result)
-            payload = memoryview(result).cast("B")
-            total_chunks = max(1, math.ceil(len(payload) / self.chunk_bytes))
-            socket.send_json({
+            payload = result.tobytes()
+            metadata = json.dumps({
                 "dtype_source": str(result.dtype),
                 "shape_source": result.shape,
                 "size": "640x480",
                 "fps": "60",
-                "total_chunk": total_chunks,
-            })
+            }).encode('utf-8')
+            socket.send_multipart([metadata, payload])
             socket.recv_string()
-            for index in range(total_chunks):
-                start = index * self.chunk_bytes
-                socket.send(payload[start:start + self.chunk_bytes])
-                socket.recv_string()
-            socket.send(b"END")
-            socket.recv_string()
-            print(f"Returned result: {result.shape} in {total_chunks} chunk(s)")
+            print(f"Returned result: {result.shape} ({len(payload)} bytes)")
         finally:
             socket.close(0)
 

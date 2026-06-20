@@ -97,14 +97,23 @@ Captures 200 frames from webcam and measures per-stage timing (detection, ONNX s
 ### Remote Processing (ZMQ Architecture)
 - **Client** (`remote_processor.py`): Windows machine with physical webcam
   - Sends source face image once at startup (via `push_addr` on port 5555)
-  - Streams webcam frames via ffmpeg to Colab (via `push_addr_two` on port 5556)
-  - Receives processed frames via ffmpeg from Colab (via `pull_addr` on port 5557)
+  - Sends target image for processing (via `push_addr_two` on port 5556)
+  - Receives processed result (via `pull_addr` on port 5557)
 - **Server** (Colab notebook): Runs ZMQ REP sockets to receive frames, perform GPU swap, return results
-- **Transport**: Tailscale VPN for secure tunneling; ffmpeg handles video encoding/decoding
+- **Transport**: Tailscale VPN for secure tunneling
+- **Protocol**: Single multipart ZMQ messages (metadata JSON + raw image bytes)
+  - **Old protocol** (chunked): 3 round trips per image (metadata→ACK, chunks→ACK each, END→ACK) × 3 images = **9 total round trips**
+  - **New protocol** (multipart): 1 round trip per image (multipart→ACK) × 3 images = **3 total round trips**
+  - **Latency reduction**: ~67% fewer network round trips
+  - **Implementation**: `send_multipart([metadata_json, raw_bytes])` + single ACK
+- **Key Optimizations**:
+  - Source face caching: Colab analyzes source face once, caches the detected face object for subsequent swaps
+  - Raw uint8 images: No compression overhead, ~660 KB for 624×352 result
+  - InsightFace warm-up: Models initialized once during Colab startup
 - **Key Config** (`globals.py`):
-  - `push_addr`, `push_addr_two`, `pull_addr` - ZMQ endpoints
+  - `push_addr`, `push_addr_two`, `pull_addr` - ZMQ endpoints (ports 5555, 5556, 5557)
   - `live_width`, `live_height`, `live_fps` - Stream resolution/framerate
-  - `gof`, `bitrate`, `maxrate`, `bufsize` - ffmpeg encoding params
+  - `gof`, `bitrate`, `maxrate`, `bufsize` - ffmpeg encoding params (live mode only)
 
 ### Frame Processors
 Frame processors implement this interface (see `processors/frame/core.py`):
@@ -159,7 +168,12 @@ All runtime config lives in `modules/globals.py` (not best practice but matches 
 - Detection runs every 3rd frame by default (cached face tracking reduces overhead)
 - `_fast_paste_back` in `face_swapper.py` performs in-place writes (no frame.copy())
 - Benchmark targets ~60 FPS on 1080p with CUDA providers
-- Remote processing adds ~100-200ms latency due to network + encoding
+- **Remote processing latency** (image mode):
+  - Network round trips dominate latency (not payload size)
+  - Optimized protocol: 3 round trips per swap vs. 9 in old chunked protocol
+  - Typical Tailscale RTT: 20-50ms → total transport ~60-150ms (3 × RTT)
+  - GPU inference: ~50-100ms (T4 Colab GPU)
+  - **Total latency**: ~110-250ms per image (down from ~230-550ms with chunked protocol)
 
 ### Code Patterns
 - **No type hints**: Legacy codebase from roop, minimal typing

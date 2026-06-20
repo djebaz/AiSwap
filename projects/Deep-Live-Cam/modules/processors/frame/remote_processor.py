@@ -4,14 +4,12 @@ import modules.globals
 import numpy as np
 import threading
 import time
-import io
+import json
 import modules.processors.frame.core
-from tqdm import tqdm
 from modules.typing import Face, Frame
 from typing import Any,List
 from modules.core import update_status
 from modules.utilities import conditional_download, resolve_relative_path, is_image, is_video
-import zlib
 import subprocess
 from cv2 import VideoCapture
 import queue
@@ -20,7 +18,6 @@ NAME = 'DLC.REMOTE-PROCESSOR'
 context = zmq.Context()
 SOCKET_TIMEOUT_MS = 15_000
 RESULT_TIMEOUT_MS = 120_000
-CHUNK_SIZE = 4 * 1024 * 1024
 
 # Socket to send messages on
 def push_socket(address) -> zmq.Socket:
@@ -59,30 +56,12 @@ def process_frame(source_frame: Frame, temp_frame: Frame)-> Frame:
     temp_framex = swap_frame_face_remote(source_frame,temp_frame)
 
     return temp_framex
-def send_data(sender: zmq.Socket, face_bytes: bytes, metadata: dict, address: str) -> None:
-    chunk_size = CHUNK_SIZE
-    total_chunk = (len(face_bytes) + chunk_size - 1) // chunk_size #len(face_bytes) // chunk_size + 1
-    new_metadata = {'total_chunk': total_chunk}
-    metadata.update(new_metadata)
-    # Send metadata first
-    sender.send_json(metadata)
-    # Wait for acknowledgment for metadata
+def send_data(sender: zmq.Socket, face_bytes: bytes, metadata: dict) -> None:
+    """Send image via single multipart ZMQ message (metadata + bytes)."""
+    metadata_json = json.dumps(metadata).encode('utf-8')
+    sender.send_multipart([metadata_json, face_bytes])
     ack = sender.recv_string()
-    with tqdm(total=total_chunk, desc="Sending chunks", unit="chunk") as pbar:
-        for i in range(total_chunk):
-            chunk = face_bytes[i * chunk_size:(i + 1) * chunk_size]
-            # Send the chunk
-            sender.send(chunk)
-            # Wait for acknowledgment after sending each chunk
-            ack = sender.recv_string()
-            pbar.set_postfix_str(f'Chunk {i + 1}/{total_chunk} ack: {ack}')
-            pbar.update(1)
-       
-    # Send a final message to indicate all chunks are sent
-    sender.send(b"END")
-    # Wait for the final reply
-    final_reply_message = sender.recv_string()
-    print(f"Received final reply: {final_reply_message}")
+    print(f"Sent {len(face_bytes)} bytes, received: {ack}")
 #client.py
 def send_source_frame(source_face: Frame)-> None:
     sender = push_socket(modules.globals.push_addr)
@@ -95,9 +74,8 @@ def send_source_frame(source_face: Frame)-> None:
             'shape_source':source_face.shape,
             'size':'640x480',
             'fps':'60'
-            #'shape_temp':temp_frame.shape
         }
-        send_data(sender, source_face_bytes, metadata,modules.globals.push_addr)
+        send_data(sender, source_face_bytes, metadata)
     finally:
         sender.close(0)
 
@@ -109,48 +87,44 @@ def send_temp_frame(temp_face: Frame)-> None:
             'manyface':(modules.globals.many_faces),
             'dtype_temp':str(temp_face.dtype),
             'shape_temp':temp_face.shape,
-            
-            #'shape_temp':temp_frame.shape
         }
-        send_data(sender, source_face_bytes, metadata,modules.globals.push_addr_two)
+        send_data(sender, source_face_bytes, metadata)
     finally:
         sender.close(0)
 
 def receive_processed_frame() -> Frame:
+    """Receive result via single multipart ZMQ message (metadata + bytes)."""
     pull_socket_ = pull_socket(modules.globals.pull_addr, RESULT_TIMEOUT_MS)
     try:
         try:
-            meta_data_json = pull_socket_.recv_json()
+            multipart = pull_socket_.recv_multipart()
         except zmq.Again as exception:
             raise TimeoutError(
                 f'Remote processor returned no result within {RESULT_TIMEOUT_MS // 1000} seconds. '
                 'Check the Colab server output for an inference or face-detection error.'
             ) from exception
-        print(meta_data_json)
-        if meta_data_json.get('status') == 'error':
-            pull_socket_.send_string("ACK")
-            raise RuntimeError(f"Remote processing failed: {meta_data_json.get('error', 'unknown error')}")
-        total_chunk = meta_data_json['total_chunk']
-        #num_data = meta_data_json['datasize']
-        # Send acknowledgment for metadata
-        pull_socket_.send_string("ACK")
-        # Receive the array bytes
-        source_array_bytes =b'' 
-        with tqdm(total=total_chunk, desc="Receiving chunks", unit="chunk") as pbar:
-            for i in range(total_chunk):
-                chunk = pull_socket_.recv()
-                source_array_bytes += chunk
-                pull_socket_.send_string(f"ACK {i + 1}/{total_chunk}")
-                pbar.set_postfix_str(f'Chunk {i + 1}/{total_chunk}')
-                pbar.update(1)
-            
 
-        end_message = pull_socket_.recv()
-        if end_message == b"END":
-            pull_socket_.send_string("Final ACK")
-        
+        if len(multipart) != 2:
+            # Handle error messages (single-part JSON)
+            if len(multipart) == 1:
+                try:
+                    error_data = json.loads(multipart[0])
+                    if error_data.get('status') == 'error':
+                        pull_socket_.send_string("ACK")
+                        raise RuntimeError(f"Remote processing failed: {error_data.get('error', 'unknown error')}")
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            raise RuntimeError(f"Expected 2-part message, got {len(multipart)}")
+
+        meta_data_json = json.loads(multipart[0])
+        payload = multipart[1]
+        pull_socket_.send_string("ACK")
+
+        print(f"Received {len(payload)} bytes: {meta_data_json}")
+
         # Deserialize the bytes back to an ndarray
-        source_array = np.frombuffer(source_array_bytes, dtype=np.dtype(meta_data_json['dtype_source'])).reshape(meta_data_json['shape_source'])
+        source_array = np.frombuffer(payload, dtype=np.dtype(meta_data_json['dtype_source']))
+        source_array = source_array.reshape(meta_data_json['shape_source'])
 
         return source_array.copy()
     finally:
