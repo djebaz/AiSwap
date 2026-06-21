@@ -219,6 +219,15 @@ class ModernEngine:
         self.get_many_faces = get_many_faces
         self.swapper = face_swapper
 
+        import onnxruntime as ort
+        available_providers = ort.get_available_providers()
+        globals_module.execution_providers = [
+            provider
+            for provider in ("CUDAExecutionProvider", "CPUExecutionProvider")
+            if provider in available_providers
+        ]
+        print("ONNX Runtime providers:", globals_module.execution_providers)
+
         print("Checking face swapper model...")
         if not face_swapper.pre_check():
             raise RuntimeError(
@@ -233,7 +242,6 @@ class ModernEngine:
         self.default_source = self._source(config.source_face) if config.source_face else None
         self.enhancer = self._load_enhancer(config.enhancer)
 
-        globals_module.execution_providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
         globals_module.many_faces = config.many_faces and not self.mapping
         globals_module.map_faces = bool(self.mapping)
         globals_module.opacity = config.opacity
@@ -432,7 +440,10 @@ def process_one(path: Path, output: Path, relative: str, config: ProcessConfig, 
             raw = decoded.get(timeout=30)
             if raw is sentinel:
                 break
-            frame = np.frombuffer(raw, np.uint8).reshape(height, width, 3)
+            # Frames backed directly by immutable pipe bytes are read-only.
+            # The modern swapper pastes results in-place, so it needs its own
+            # writable contiguous frame buffer.
+            frame = np.frombuffer(raw, np.uint8).reshape(height, width, 3).copy()
             try:
                 result = engine.process(frame, relative)
                 if result is None:
