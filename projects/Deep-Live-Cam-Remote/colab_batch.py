@@ -381,9 +381,19 @@ def process_one(path: Path, output: Path, relative: str, config: ProcessConfig, 
         try:
             raw = first
             while raw and not stop.is_set():
-                decoded.put(raw)
+                while not stop.is_set():
+                    try:
+                        decoded.put(raw, timeout=0.1)
+                        break
+                    except queue.Full:
+                        continue
                 raw = read_exact(decoder.stdout, frame_size)
-            decoded.put(sentinel)
+            while not stop.is_set():
+                try:
+                    decoded.put(sentinel, timeout=0.1)
+                    break
+                except queue.Full:
+                    continue
         except BaseException as exc:
             errors.put(("decode", exc))
             try: decoded.put(sentinel, timeout=1)
@@ -448,6 +458,8 @@ def process_one(path: Path, output: Path, relative: str, config: ProcessConfig, 
                 process.terminate()
                 try: process.wait(timeout=5)
                 except subprocess.TimeoutExpired: process.kill()
+        decode_thread.join(timeout=5)
+        encode_thread.join(timeout=5)
     if not output.is_file() or output.stat().st_size == 0:
         raise RuntimeError(f"Output not created: {output}")
     return {"frames": frames, "fallback_frames": fallbacks, "fps": fps, "width": width, "height": height, "seconds": time.monotonic() - started, "size_mb": output.stat().st_size / 1048576}

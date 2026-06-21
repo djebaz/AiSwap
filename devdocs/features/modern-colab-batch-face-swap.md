@@ -34,7 +34,7 @@ Face mapping is prepared separately with `colab_batch.py scan`, then supplied wi
 - [x] Implement batch CLI, manifest, FFmpeg pipeline, advanced processing options, mapping scan, and ZIP output.
 - [x] Add self-contained markerized notebook and generated `.ipynb`.
 - [x] Add documentation and tests.
-- [ ] Validate script syntax, tests, notebook round trip, and repository diff.
+- [x] Validate script syntax, tests, notebook round trip, and repository diff.
 
 ## Decisions
 
