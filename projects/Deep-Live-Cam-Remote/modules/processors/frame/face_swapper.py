@@ -200,12 +200,23 @@ def pre_check() -> bool:
         return False
     
     # Use the direct download URL from Hugging Face (FP32 model for broad GPU compatibility)
-    conditional_download(
-        download_directory_path,
-        [
-            "https://huggingface.co/hacksider/deep-live-cam/resolve/main/inswapper_128.onnx"
-        ],
-    )
+    model_path = os.path.join(download_directory_path, "inswapper_128.onnx")
+    # Remove an interrupted/HTML error download so conditional_download retries.
+    if os.path.exists(model_path) and os.path.getsize(model_path) < 1024 * 1024:
+        os.remove(model_path)
+    try:
+        conditional_download(
+            download_directory_path,
+            [
+                "https://huggingface.co/hacksider/deep-live-cam/resolve/main/inswapper_128.onnx"
+            ],
+        )
+    except Exception as error:
+        update_status(f"Could not download inswapper_128.onnx: {error}", NAME)
+        return False
+    if not os.path.isfile(model_path) or os.path.getsize(model_path) < 1024 * 1024:
+        update_status(f"inswapper_128.onnx download is missing or incomplete: {model_path}", NAME)
+        return False
     return True
 
 

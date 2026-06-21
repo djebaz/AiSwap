@@ -218,6 +218,16 @@ class ModernEngine:
         self.get_one_face = get_one_face
         self.get_many_faces = get_many_faces
         self.swapper = face_swapper
+
+        print("Checking face swapper model...")
+        if not face_swapper.pre_check():
+            raise RuntimeError(
+                "Could not provision models/inswapper_128.onnx. "
+                "Check Colab internet access and rerun the cell."
+            )
+        if not face_swapper.pre_start():
+            raise RuntimeError("The face swapper model could not be loaded.")
+
         self.source_cache: dict[str, Any] = {}
         self.mapping = self._load_mapping(config.map_config)
         self.default_source = self._source(config.source_face) if config.source_face else None

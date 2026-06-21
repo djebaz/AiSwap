@@ -33,6 +33,8 @@ python colab_batch.py process \
 The default pipeline caps processing/output at 30 FPS and 420 pixels wide,
 resizes before inference, preserves audio, uses bounded decode/encode queues,
 and skips only exact matches from its input/source/model/settings manifest.
+On the first run it downloads and validates `models/inswapper_128.onnx` before
+processing starts, instead of silently emitting unchanged frames.
 Use `--help` for SS/duration, multi-face, mouth mask, opacity, sharpness,
 interpolation, Poisson, color correction, and GFPGAN/GPEN options.
 

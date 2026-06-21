@@ -10,6 +10,7 @@ Create `projects/Deep-Live-Cam-Remote` from the modern `tmp/Deep-Live-Cam` basel
 - Decode and resize with FFmpeg before inference, cap input at 30 FPS and 420 pixels wide by default, overlap decode/encode with bounded queues, preserve audio, and package outputs as a ZIP.
 - Persist a settings-aware manifest so identical work is skipped while changed inputs, faces, models, or processing options are reprocessed.
 - Expose the modern headless engine features: many-face processing, face mapping, mouth masking, opacity, sharpening, temporal interpolation, Poisson blending, color correction, and GFPGAN/GPEN enhancement.
+- Provision and validate the InsightFace swapper model before processing so a missing model fails once with an actionable error rather than producing unchanged output frames.
 
 ## Examples
 
