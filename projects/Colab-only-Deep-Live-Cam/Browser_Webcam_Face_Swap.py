@@ -1,6 +1,6 @@
 # Auto-generated from notebook; keep markers for round-trip
 # Markers + docstring headers are required for ipynb reconstruction
-# NOTEBOOK_META_B64=eyJjb2xhYiI6eyJwcm92ZW5hbmNlIjpbXX0sImtlcm5lbHNwZWMiOnsibmFtZSI6InB5dGhvbjMiLCJkaXNwbGF5X25hbWUiOiJQeXRob24gMyJ9LCJsYW5ndWFnZV9pbmZvIjp7Im5hbWUiOiJweXRob24ifSwibmJmb3JtYXQiOjQsIm5iZm9ybWF0X21pbm9yIjowfQ==
+# NOTEBOOK_META_B64=eyJjb2xhYiI6eyJwcm92ZW5hbmNlIjpbXSwiY29sbGFwc2VkX3NlY3Rpb25zIjpbImJhdGNoLXZpZGVvLWhlYWRpbmciXX0sImtlcm5lbHNwZWMiOnsibGFuZ3VhZ2UiOiJweXRob24iLCJuYW1lIjoicHl0aG9uMyIsImRpc3BsYXlfbmFtZSI6IlB5dGhvbiAzIn0sImxhbmd1YWdlX2luZm8iOnsibmFtZSI6InB5dGhvbiJ9LCJuYmZvcm1hdCI6NCwibmJmb3JtYXRfbWlub3IiOjB9
 
 # %% [markdown] cell=0
 """MARKDOWN
@@ -885,3 +885,882 @@ Run the cell below to modify the streaming logic so that it also records the vid
 
 After you've finished streaming (by interrupting the 'True Video Streaming' cell), **you MUST run the Python cell above this markdown cell** to properly stop the FFmpeg process and finalize the `output_face_swap.mp4` file. If you don't, the video file will likely be corrupted or unplayable (missing the `moov` atom).
 """ENDMARKDOWN
+
+# %% [markdown] cell=30 id=batch-video-heading
+"""MARKDOWN
+## 13. Batch-process video folders
+
+Run one of the following cells after the face-analysis and `swap_face()` setup cells. Both use paths directly in `/content`; no upload widget is required.
+"""ENDMARKDOWN
+
+# %% [code] cell=31 id=batch-video-cv2
+"""CELL: Batch video folder (OpenCV + FFmpeg)"""
+# @title Batch video folder (OpenCV + FFmpeg)
+import cv2
+import subprocess
+import shutil
+from pathlib import Path
+from tqdm.auto import tqdm
+
+# Assumes get_one_face() and swap_face() were initialized by earlier notebook cells.
+
+SOURCE_FACE_PATH = Path("/content/vi_0003_portrait.png")
+INPUT_VIDEO_DIR = Path("/content/input_videos")
+OUTPUT_VIDEO_DIR = Path("/content/output_videos")
+
+SS = 10.0
+DURATION = 30.0  # Use None for the remainder of each video.
+
+RECURSIVE = True
+OVERWRITE_EXISTING = False
+AUTO_DOWNLOAD_EACH_VIDEO = True
+DOWNLOAD_OUTPUT_ZIP = False
+
+VIDEO_EXTENSIONS = {
+    ".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".mpeg", ".mpg"
+}
+TEMP_DIR = OUTPUT_VIDEO_DIR / "_temporary"
+
+if SS < 0:
+    raise ValueError("SS cannot be negative.")
+if DURATION is not None and DURATION <= 0:
+    raise ValueError("DURATION must be positive or None.")
+if AUTO_DOWNLOAD_EACH_VIDEO or DOWNLOAD_OUTPUT_ZIP:
+    from google.colab import files as colab_files
+
+if not SOURCE_FACE_PATH.is_file():
+    raise FileNotFoundError(f"Source face not found: {SOURCE_FACE_PATH}")
+if not INPUT_VIDEO_DIR.is_dir():
+    raise NotADirectoryError(f"Input folder not found: {INPUT_VIDEO_DIR}")
+
+OUTPUT_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+TEMP_DIR.mkdir(parents=True, exist_ok=True)
+
+source_image = cv2.imread(str(SOURCE_FACE_PATH))
+if source_image is None:
+    raise ValueError(f"Could not read source image: {SOURCE_FACE_PATH}")
+source_face = get_one_face(source_image)
+if source_face is None:
+    raise ValueError("No face detected in the source image.")
+
+print(f"✓ Source face: {SOURCE_FACE_PATH}")
+print(f"✓ SS: {SS:.3f} seconds")
+print(
+    "✓ Duration: "
+    + (f"{DURATION:.3f} seconds" if DURATION is not None else "remainder of each video")
+)
+
+iterator = INPUT_VIDEO_DIR.rglob("*") if RECURSIVE else INPUT_VIDEO_DIR.glob("*")
+video_paths = sorted(
+    path
+    for path in iterator
+    if path.is_file()
+    and path.suffix.lower() in VIDEO_EXTENSIONS
+    and OUTPUT_VIDEO_DIR.resolve() not in path.resolve().parents
+)
+if not video_paths:
+    raise FileNotFoundError(f"No videos found in: {INPUT_VIDEO_DIR}")
+print(f"✓ Found {len(video_paths)} video(s)")
+
+segment_parts = []
+if SS > 0:
+    segment_parts.append(f"ss{SS:g}".replace(".", "p"))
+if DURATION is not None:
+    segment_parts.append(f"dur{DURATION:g}".replace(".", "p"))
+segment_suffix = "_" + "_".join(segment_parts) if segment_parts else ""
+
+
+def process_video(input_path, output_path, silent_path):
+    capture = None
+    writer = None
+    progress = None
+    processed_frames = 0
+    fallback_frames = 0
+
+    try:
+        capture = cv2.VideoCapture(str(input_path))
+        if not capture.isOpened():
+            raise RuntimeError(f"Could not open video: {input_path}")
+
+        fps = capture.get(cv2.CAP_PROP_FPS)
+        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        source_frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        if not fps or fps <= 0:
+            fps = 25.0
+        if width <= 0 or height <= 0:
+            raise RuntimeError(f"Invalid dimensions: {width}x{height}")
+
+        start_frame = int(round(SS * fps))
+        if source_frame_count > 0 and start_frame >= source_frame_count:
+            raise ValueError(f"SS={SS} is beyond the end of {input_path.name}")
+
+        capture.set(cv2.CAP_PROP_POS_MSEC, SS * 1000.0)
+
+        if DURATION is not None:
+            maximum_frames = max(1, int(round(DURATION * fps)))
+        elif source_frame_count > 0:
+            maximum_frames = max(0, source_frame_count - start_frame)
+        else:
+            maximum_frames = None
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        silent_path.parent.mkdir(parents=True, exist_ok=True)
+
+        writer = cv2.VideoWriter(
+            str(silent_path),
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            fps,
+            (width, height),
+        )
+        if not writer.isOpened():
+            raise RuntimeError(f"Could not create: {silent_path}")
+
+        progress = tqdm(
+            total=maximum_frames,
+            desc=input_path.name,
+            unit="frame",
+            leave=True,
+        )
+
+        while True:
+            if maximum_frames is not None and processed_frames >= maximum_frames:
+                break
+
+            success, frame = capture.read()
+            if not success:
+                break
+
+            try:
+                output_frame = swap_face(source_face, frame)
+                if output_frame is None:
+                    output_frame = frame
+                    fallback_frames += 1
+            except Exception as error:
+                output_frame = frame
+                fallback_frames += 1
+                if fallback_frames <= 3:
+                    print(f"\nFrame warning in {input_path.name}: {error}")
+
+            if output_frame.shape[:2] != (height, width):
+                output_frame = cv2.resize(
+                    output_frame,
+                    (width, height),
+                    interpolation=cv2.INTER_LINEAR,
+                )
+
+            writer.write(output_frame)
+            processed_frames += 1
+            progress.update(1)
+    finally:
+        if progress is not None:
+            progress.close()
+        if capture is not None:
+            capture.release()
+        if writer is not None:
+            writer.release()
+
+    if processed_frames == 0:
+        raise RuntimeError(f"No frames processed: {input_path}")
+
+    actual_duration = processed_frames / fps
+    ffmpeg_command = ["ffmpeg", "-y", "-i", str(silent_path)]
+    if SS > 0:
+        ffmpeg_command.extend(["-ss", f"{SS:.6f}"])
+    ffmpeg_command.extend(
+        [
+            "-t", f"{actual_duration:.6f}",
+            "-i", str(input_path),
+            "-map", "0:v:0",
+            "-map", "1:a:0?",
+            "-c:v", "h264_nvenc",
+            "-preset", "p4",
+            "-cq", "18",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-shortest",
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+    )
+
+    result = subprocess.run(
+        ffmpeg_command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if result.returncode != 0:
+        output_path.unlink(missing_ok=True)
+        raise RuntimeError("FFmpeg failed:\n" + result.stderr[-4000:])
+    if not output_path.is_file() or output_path.stat().st_size == 0:
+        raise RuntimeError(f"Output not created: {output_path}")
+
+    silent_path.unlink(missing_ok=True)
+    return {
+        "frames": processed_frames,
+        "fallback_frames": fallback_frames,
+        "duration": actual_duration,
+        "size_mb": output_path.stat().st_size / (1024 * 1024),
+    }
+
+
+completed = []
+skipped = []
+failed = []
+downloaded = []
+
+for index, input_path in enumerate(video_paths, start=1):
+    relative_path = input_path.relative_to(INPUT_VIDEO_DIR)
+    output_path = (
+        OUTPUT_VIDEO_DIR
+        / relative_path.parent
+        / f"{input_path.stem}_face_swapped{segment_suffix}.mp4"
+    )
+    silent_path = (
+        TEMP_DIR
+        / relative_path.parent
+        / f"{input_path.stem}_silent{segment_suffix}.mp4"
+    )
+
+    print(f"\n[{index}/{len(video_paths)}] {relative_path}")
+
+    if output_path.exists() and not OVERWRITE_EXISTING:
+        print(f"↷ Skipped existing: {output_path}")
+        skipped.append(output_path)
+        continue
+
+    output_path.unlink(missing_ok=True)
+    silent_path.unlink(missing_ok=True)
+
+    try:
+        information = process_video(input_path, output_path, silent_path)
+        completed.append(output_path)
+
+        print(f"✓ Output: {output_path}")
+        print(f"  Frames: {information['frames']}")
+        print(f"  Duration: {information['duration']:.2f}s")
+        print(f"  Fallback frames: {information['fallback_frames']}")
+        print(f"  Size: {information['size_mb']:.1f} MB")
+
+        if AUTO_DOWNLOAD_EACH_VIDEO:
+            try:
+                print(f"↓ Starting download: {output_path.name}")
+                colab_files.download(str(output_path))
+                downloaded.append(output_path)
+            except Exception as download_error:
+                print(f"⚠ Automatic download failed: {download_error}")
+    except Exception as error:
+        silent_path.unlink(missing_ok=True)
+        output_path.unlink(missing_ok=True)
+        failed.append((input_path, str(error)))
+        print(f"✗ Failed: {input_path}")
+        print(f"  Reason: {error}")
+
+try:
+    TEMP_DIR.rmdir()
+except OSError:
+    pass
+
+print("\n" + "=" * 70)
+print("BATCH COMPLETE")
+print("=" * 70)
+print(f"Completed:  {len(completed)}")
+print(f"Downloaded: {len(downloaded)}")
+print(f"Skipped:    {len(skipped)}")
+print(f"Failed:     {len(failed)}")
+print(f"Output:     {OUTPUT_VIDEO_DIR}")
+
+if AUTO_DOWNLOAD_EACH_VIDEO:
+    print(
+        "\nIf only the first download started, allow multiple downloads for "
+        "colab.research.google.com in your browser."
+    )
+
+if failed:
+    print("\nFailed videos:")
+    for input_path, error in failed:
+        print(f"- {input_path}: {error}")
+
+if DOWNLOAD_OUTPUT_ZIP and completed:
+    zip_base = Path("/content/face_swapped_videos")
+    zip_path = Path(
+        shutil.make_archive(
+            str(zip_base),
+            "zip",
+            root_dir=str(OUTPUT_VIDEO_DIR),
+        )
+    )
+    print(f"\n↓ Downloading ZIP: {zip_path}")
+    colab_files.download(str(zip_path))
+
+# %% [code] cell=32 id=batch-video-ffmpeg-pipe
+"""CELL: Batch video folder (FFmpeg pipe, up to 30 FPS)"""
+# @title Batch video folder (FFmpeg pipe, up to 30 FPS)
+import json
+import shutil
+import subprocess
+from fractions import Fraction
+from pathlib import Path
+
+import cv2
+import numpy as np
+from tqdm.auto import tqdm
+
+# Assumes get_one_face() and swap_face() were initialized by earlier notebook cells.
+
+SOURCE_FACE_PATH = Path("/content/vi_0003_portrait.png")
+INPUT_VIDEO_DIR = Path("/content/in")
+OUTPUT_VIDEO_DIR = Path("/content/outp")
+
+SS = 10.0
+DURATION = 10.0  # Use None for the remainder of each video.
+MAX_PROCESS_FPS = 30.0  # Preserve lower FPS; cap higher-FPS inputs at this value.
+SHORT_VIDEO_SS_POLICY = "start"  # "start" processes short clips from 0; "skip" rejects them.
+
+RECURSIVE = True
+OVERWRITE_EXISTING = False
+SKIP_ALREADY_PROCESSED = True
+AUTO_DOWNLOAD_EACH_VIDEO = False
+DOWNLOAD_OUTPUT_ZIP = True
+
+USE_CUDA_DECODE = True
+NVENC_ENCODER = "h264_nvenc"
+NVENC_PRESET = "p4"
+NVENC_CQ = 18
+
+VIDEO_EXTENSIONS = {
+    ".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".mpeg", ".mpg"
+}
+
+if MAX_PROCESS_FPS <= 0:
+    raise ValueError("MAX_PROCESS_FPS must be positive.")
+
+if SS < 0:
+    raise ValueError("SS cannot be negative.")
+if DURATION is not None and DURATION <= 0:
+    raise ValueError("DURATION must be positive or None.")
+if AUTO_DOWNLOAD_EACH_VIDEO or DOWNLOAD_OUTPUT_ZIP:
+    from google.colab import files as colab_files
+
+if not SOURCE_FACE_PATH.is_file():
+    raise FileNotFoundError(f"Source face not found: {SOURCE_FACE_PATH}")
+if not INPUT_VIDEO_DIR.is_dir():
+    raise NotADirectoryError(f"Input folder not found: {INPUT_VIDEO_DIR}")
+
+OUTPUT_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+PROCESSED_MANIFEST_PATH = OUTPUT_VIDEO_DIR / ".face_swap_processed.json"
+
+
+def processed_input_key(input_path):
+    stat = input_path.stat()
+    relative = input_path.relative_to(INPUT_VIDEO_DIR).as_posix()
+    return f"{relative}|{stat.st_size}|{stat.st_mtime_ns}"
+
+
+def load_processed_manifest():
+    if not PROCESSED_MANIFEST_PATH.is_file():
+        return {}
+    try:
+        payload = json.loads(PROCESSED_MANIFEST_PATH.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception as error:
+        print(f"⚠ Ignoring invalid processed manifest: {error}")
+        return {}
+
+
+def save_processed_manifest():
+    temporary_path = Path(str(PROCESSED_MANIFEST_PATH) + ".tmp")
+    temporary_path.write_text(
+        json.dumps(processed_manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary_path.replace(PROCESSED_MANIFEST_PATH)
+
+
+processed_manifest = load_processed_manifest()
+
+source_image = cv2.imread(str(SOURCE_FACE_PATH))
+if source_image is None:
+    raise ValueError(f"Could not read source image: {SOURCE_FACE_PATH}")
+source_face = get_one_face(source_image)
+if source_face is None:
+    raise ValueError("No face detected in the source image.")
+
+print(f"✓ Source face: {SOURCE_FACE_PATH}")
+print(f"✓ SS: {SS:.3f} seconds")
+print(
+    "✓ Duration: "
+    + (f"{DURATION:.3f} seconds" if DURATION is not None else "remainder of each video")
+)
+print(f"✓ CUDA decode requested: {USE_CUDA_DECODE}")
+
+iterator = INPUT_VIDEO_DIR.rglob("*") if RECURSIVE else INPUT_VIDEO_DIR.glob("*")
+video_paths = sorted(
+    path
+    for path in iterator
+    if path.is_file()
+    and path.suffix.lower() in VIDEO_EXTENSIONS
+    and OUTPUT_VIDEO_DIR.resolve() not in path.resolve().parents
+)
+if not video_paths:
+    raise FileNotFoundError(f"No videos found in: {INPUT_VIDEO_DIR}")
+print(f"✓ Found {len(video_paths)} video(s)")
+
+segment_parts = []
+if SS > 0:
+    segment_parts.append(f"ss{SS:g}".replace(".", "p"))
+if DURATION is not None:
+    segment_parts.append(f"dur{DURATION:g}".replace(".", "p"))
+segment_suffix = "_" + "_".join(segment_parts) if segment_parts else ""
+
+
+def parse_fraction(value):
+    if not value or value in {"0/0", "N/A"}:
+        return 0.0
+    try:
+        return float(Fraction(value))
+    except (ValueError, ZeroDivisionError):
+        return 0.0
+
+
+def probe_video(input_path):
+    command = [
+        "ffprobe",
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height,avg_frame_rate,r_frame_rate,nb_frames,duration",
+        "-show_entries", "format=duration",
+        "-of", "json",
+        str(input_path),
+    ]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError("ffprobe failed:\n" + result.stderr[-4000:])
+
+    payload = json.loads(result.stdout)
+    streams = payload.get("streams", [])
+    if not streams:
+        raise RuntimeError(f"No video stream found: {input_path}")
+
+    stream = streams[0]
+    width = int(stream.get("width") or 0)
+    height = int(stream.get("height") or 0)
+    fps = parse_fraction(stream.get("avg_frame_rate"))
+    if fps <= 0:
+        fps = parse_fraction(stream.get("r_frame_rate"))
+    if fps <= 0:
+        fps = 25.0
+
+    duration_value = stream.get("duration") or payload.get("format", {}).get("duration")
+    try:
+        duration = float(duration_value)
+    except (TypeError, ValueError):
+        duration = None
+
+    try:
+        frame_count = int(stream.get("nb_frames"))
+    except (TypeError, ValueError):
+        frame_count = None
+
+    if width <= 0 or height <= 0:
+        raise RuntimeError(f"Invalid dimensions: {width}x{height}")
+
+    return {
+        "width": width,
+        "height": height,
+        "fps": fps,
+        "duration": duration,
+        "frame_count": frame_count,
+    }
+
+
+def read_exact(stream, byte_count):
+    chunks = []
+    remaining = byte_count
+    while remaining > 0:
+        chunk = stream.read(remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    data = b"".join(chunks)
+    return data if len(data) == byte_count else b""
+
+
+def decoder_command(input_path, use_cuda, start_seconds, clip_duration, process_fps):
+    command = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
+    if use_cuda:
+        command.extend(["-hwaccel", "cuda"])
+    if start_seconds > 0:
+        command.extend(["-ss", f"{start_seconds:.6f}"])
+    command.extend(["-i", str(input_path)])
+    if clip_duration is not None:
+        command.extend(["-t", f"{clip_duration:.6f}"])
+    command.extend(
+        [
+            "-map", "0:v:0",
+            "-an", "-sn", "-dn",
+            "-vf", f"fps={process_fps:.12g}",
+            "-vsync", "0",
+            "-f", "rawvideo",
+            "-pix_fmt", "bgr24",
+            "pipe:1",
+        ]
+    )
+    return command
+
+
+def start_decoder(input_path, use_cuda, start_seconds, clip_duration, process_fps):
+    return subprocess.Popen(
+        decoder_command(input_path, use_cuda, start_seconds, clip_duration, process_fps),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=10**8,
+    )
+
+
+def encoder_command(input_path, output_path, width, height, fps, start_seconds, clip_duration):
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-y",
+        "-f", "rawvideo",
+        "-pix_fmt", "bgr24",
+        "-video_size", f"{width}x{height}",
+        "-framerate", f"{fps:.12g}",
+        "-i", "pipe:0",
+    ]
+
+    if start_seconds > 0:
+        command.extend(["-ss", f"{start_seconds:.6f}"])
+    command.extend(["-t", f"{clip_duration:.6f}", "-i", str(input_path)])
+    command.extend(
+        [
+            "-map", "0:v:0",
+            "-map", "1:a:0?",
+            "-map_metadata", "1",
+            "-c:v", NVENC_ENCODER,
+            "-preset", NVENC_PRESET,
+            "-cq", str(NVENC_CQ),
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-shortest",
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+    )
+    return command
+
+
+def process_video(input_path, output_path):
+    info = probe_video(input_path)
+    width = info["width"]
+    height = info["height"]
+    source_fps = info["fps"]
+    fps = min(source_fps, MAX_PROCESS_FPS)
+    print(f"  FPS: {source_fps:.3f} input -> {fps:.3f} processing/output")
+    source_duration = info["duration"]
+
+    effective_ss = SS
+    if source_duration is not None and effective_ss >= source_duration:
+        if SHORT_VIDEO_SS_POLICY == "start":
+            print(
+                f"⚠ {input_path.name} is shorter than SS={SS}; "
+                "processing from 0 seconds instead."
+            )
+            effective_ss = 0.0
+        else:
+            raise ValueError(f"SS={SS} is beyond the end of {input_path.name}")
+
+    remaining_duration = (
+        None if source_duration is None else max(0.0, source_duration - effective_ss)
+    )
+    if DURATION is None:
+        requested_duration = remaining_duration
+    elif remaining_duration is None:
+        requested_duration = DURATION
+    else:
+        requested_duration = min(DURATION, remaining_duration)
+
+    if requested_duration is not None and requested_duration <= 0:
+        raise ValueError(f"No duration remains after SS={SS}: {input_path.name}")
+
+    maximum_frames = (
+        max(1, int(round(requested_duration * fps)))
+        if requested_duration is not None
+        else None
+    )
+    frame_bytes = width * height * 3
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.unlink(missing_ok=True)
+
+    decoder = None
+    encoder = None
+    progress = None
+    processed_frames = 0
+    fallback_frames = 0
+    stopped_decoder_early = False
+
+    try:
+        decoder = start_decoder(input_path, USE_CUDA_DECODE, effective_ss, requested_duration, fps)
+        raw_frame = read_exact(decoder.stdout, frame_bytes)
+
+        if not raw_frame and USE_CUDA_DECODE:
+            cuda_error = decoder.stderr.read().decode("utf-8", errors="replace")
+            decoder.wait()
+            print(f"⚠ CUDA decode unavailable for {input_path.name}; using software decode.")
+            if cuda_error.strip():
+                print(cuda_error[-1000:])
+            decoder = start_decoder(input_path, False, effective_ss, requested_duration, fps)
+            raw_frame = read_exact(decoder.stdout, frame_bytes)
+
+        if not raw_frame:
+            decode_error = decoder.stderr.read().decode("utf-8", errors="replace")
+            decoder.wait()
+            raise RuntimeError("FFmpeg produced no frames:\n" + decode_error[-4000:])
+
+        encoder_duration = requested_duration
+        if encoder_duration is None:
+            if info["frame_count"]:
+                encoder_duration = max(1.0 / fps, (info["frame_count"] / source_fps) - effective_ss)
+            else:
+                encoder_duration = 24 * 60 * 60
+
+        encoder = subprocess.Popen(
+            encoder_command(
+                input_path,
+                output_path,
+                width,
+                height,
+                fps,
+                effective_ss,
+                encoder_duration,
+            ),
+            stdin=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=10**8,
+        )
+
+        progress = tqdm(
+            total=maximum_frames,
+            desc=input_path.name,
+            unit="frame",
+            leave=True,
+        )
+
+        while raw_frame:
+            frame = np.frombuffer(raw_frame, dtype=np.uint8).reshape((height, width, 3))
+
+            try:
+                output_frame = swap_face(source_face, frame)
+                if output_frame is None:
+                    output_frame = frame
+                    fallback_frames += 1
+            except Exception as error:
+                output_frame = frame
+                fallback_frames += 1
+                if fallback_frames <= 3:
+                    print(f"\nFrame warning in {input_path.name}: {error}")
+
+            if output_frame.shape[:2] != (height, width):
+                output_frame = cv2.resize(
+                    output_frame,
+                    (width, height),
+                    interpolation=cv2.INTER_LINEAR,
+                )
+
+            try:
+                encoder.stdin.write(np.ascontiguousarray(output_frame).tobytes())
+            except BrokenPipeError:
+                encode_error = encoder.stderr.read().decode("utf-8", errors="replace")
+                raise RuntimeError("FFmpeg encoder pipe closed:\n" + encode_error[-4000:])
+
+            processed_frames += 1
+            progress.update(1)
+
+            if maximum_frames is not None and processed_frames >= maximum_frames:
+                stopped_decoder_early = True
+                break
+
+            raw_frame = read_exact(decoder.stdout, frame_bytes)
+
+        if processed_frames == 0:
+            raise RuntimeError(f"No frames processed: {input_path}")
+
+        encoder.stdin.close()
+        encoder.stdin = None
+
+        if stopped_decoder_early and decoder.poll() is None:
+            decoder.terminate()
+        if decoder.stdout is not None:
+            decoder.stdout.close()
+        decoder.wait()
+
+        encoder_return_code = encoder.wait()
+        encode_error = encoder.stderr.read().decode("utf-8", errors="replace")
+        if encoder_return_code != 0:
+            raise RuntimeError("FFmpeg encode failed:\n" + encode_error[-4000:])
+
+        if not stopped_decoder_early and decoder.returncode != 0:
+            decode_error = decoder.stderr.read().decode("utf-8", errors="replace")
+            raise RuntimeError("FFmpeg decode failed:\n" + decode_error[-4000:])
+
+    finally:
+        if progress is not None:
+            progress.close()
+
+        if decoder is not None:
+            if decoder.stdout is not None and not decoder.stdout.closed:
+                decoder.stdout.close()
+            if decoder.poll() is None:
+                decoder.terminate()
+                try:
+                    decoder.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    decoder.kill()
+                    decoder.wait()
+
+        if encoder is not None:
+            if encoder.stdin is not None and not encoder.stdin.closed:
+                encoder.stdin.close()
+            if encoder.poll() is None:
+                encoder.terminate()
+                try:
+                    encoder.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    encoder.kill()
+                    encoder.wait()
+
+    if not output_path.is_file() or output_path.stat().st_size == 0:
+        output_path.unlink(missing_ok=True)
+        raise RuntimeError(f"Output not created: {output_path}")
+
+    actual_duration = processed_frames / fps
+    return {
+        "frames": processed_frames,
+        "source_fps": source_fps,
+        "output_fps": fps,
+        "fallback_frames": fallback_frames,
+        "duration": actual_duration,
+        "size_mb": output_path.stat().st_size / (1024 * 1024),
+    }
+
+
+completed = []
+skipped = []
+failed = []
+downloaded = []
+
+for index, input_path in enumerate(video_paths, start=1):
+    relative_path = input_path.relative_to(INPUT_VIDEO_DIR)
+    input_key = processed_input_key(input_path)
+    output_path = (
+        OUTPUT_VIDEO_DIR
+        / relative_path.parent
+        / f"{input_path.stem}_face_swapped{segment_suffix}.mp4"
+    )
+
+    print(f"\n[{index}/{len(video_paths)}] {relative_path}")
+
+    previous_outputs = sorted(
+        output_path.parent.glob(f"{input_path.stem}_face_swapped*.mp4")
+    )
+    manifest_match = input_key in processed_manifest
+    should_skip = not OVERWRITE_EXISTING and (
+        output_path.exists()
+        or (
+            SKIP_ALREADY_PROCESSED
+            and (manifest_match or bool(previous_outputs))
+        )
+    )
+
+    if should_skip:
+        previous_output = output_path if output_path.exists() else (
+            previous_outputs[0] if previous_outputs else None
+        )
+        print(
+            f"↷ Skipped already processed: {relative_path}"
+            + (f" -> {previous_output}" if previous_output else "")
+        )
+        if not manifest_match:
+            processed_manifest[input_key] = {
+                "input": relative_path.as_posix(),
+                "output": str(previous_output) if previous_output else None,
+            }
+            save_processed_manifest()
+        skipped.append(input_path)
+        continue
+
+    output_path.unlink(missing_ok=True)
+
+    try:
+        information = process_video(input_path, output_path)
+        completed.append(output_path)
+        processed_manifest[input_key] = {
+            "input": relative_path.as_posix(),
+            "output": str(output_path),
+            "frames": information["frames"],
+            "source_fps": information["source_fps"],
+            "output_fps": information["output_fps"],
+        }
+        save_processed_manifest()
+
+        print(f"✓ Output: {output_path}")
+        print(f"  Frames: {information['frames']}")
+        print(
+            f"  FPS: {information['source_fps']:.3f} input -> "
+            f"{information['output_fps']:.3f} output"
+        )
+        print(f"  Duration: {information['duration']:.2f}s")
+        print(f"  Fallback frames: {information['fallback_frames']}")
+        print(f"  Size: {information['size_mb']:.1f} MB")
+
+        if AUTO_DOWNLOAD_EACH_VIDEO:
+            try:
+                print(f"↓ Starting download: {output_path.name}")
+                colab_files.download(str(output_path))
+                downloaded.append(output_path)
+            except Exception as download_error:
+                print(f"⚠ Automatic download failed: {download_error}")
+    except Exception as error:
+        output_path.unlink(missing_ok=True)
+        failed.append((input_path, str(error)))
+        print(f"✗ Failed: {input_path}")
+        print(f"  Reason: {error}")
+
+print("\n" + "=" * 70)
+print("FFMPEG-PIPE BATCH COMPLETE")
+print("=" * 70)
+print(f"Completed:  {len(completed)}")
+print(f"Downloaded: {len(downloaded)}")
+print(f"Skipped:    {len(skipped)}")
+print(f"Failed:     {len(failed)}")
+print(f"Output:     {OUTPUT_VIDEO_DIR}")
+
+if AUTO_DOWNLOAD_EACH_VIDEO:
+    print(
+        "\nIf only the first download started, allow multiple downloads for "
+        "colab.research.google.com in your browser."
+    )
+
+if failed:
+    print("\nFailed videos:")
+    for input_path, error in failed:
+        print(f"- {input_path}: {error}")
+
+if DOWNLOAD_OUTPUT_ZIP and completed:
+    zip_base = Path("/content/face_swapped_videos_ffmpeg")
+    zip_path = Path(
+        shutil.make_archive(
+            str(zip_base),
+            "zip",
+            root_dir=str(OUTPUT_VIDEO_DIR),
+        )
+    )
+    print(f"\n↓ Downloading ZIP: {zip_path}")
+    colab_files.download(str(zip_path))
