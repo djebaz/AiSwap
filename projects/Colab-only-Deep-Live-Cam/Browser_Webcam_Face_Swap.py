@@ -1,6 +1,6 @@
 # Auto-generated from notebook; keep markers for round-trip
 # Markers + docstring headers are required for ipynb reconstruction
-# NOTEBOOK_META_B64=eyJjb2xhYiI6eyJwcm92ZW5hbmNlIjpbXSwiY29sbGFwc2VkX3NlY3Rpb25zIjpbImJhdGNoLXZpZGVvLWhlYWRpbmciXX0sImtlcm5lbHNwZWMiOnsibGFuZ3VhZ2UiOiJweXRob24iLCJuYW1lIjoicHl0aG9uMyIsImRpc3BsYXlfbmFtZSI6IlB5dGhvbiAzIn0sImxhbmd1YWdlX2luZm8iOnsibmFtZSI6InB5dGhvbiJ9LCJuYmZvcm1hdCI6NCwibmJmb3JtYXRfbWlub3IiOjB9
+# NOTEBOOK_META_B64=eyJjb2xhYiI6eyJwcm92ZW5hbmNlIjpbXSwiY29sbGFwc2VkX3NlY3Rpb25zIjpbImJhdGNoLXZpZGVvLWhlYWRpbmciXX0sImtlcm5lbHNwZWMiOnsibGFuZ3VhZ2UiOiJweXRob24iLCJkaXNwbGF5X25hbWUiOiJQeXRob24gMyIsIm5hbWUiOiJweXRob24zIn0sImxhbmd1YWdlX2luZm8iOnsibmFtZSI6InB5dGhvbiJ9LCJuYmZvcm1hdCI6NCwibmJmb3JtYXRfbWlub3IiOjB9
 
 # %% [markdown] cell=0
 """MARKDOWN
@@ -1200,8 +1200,10 @@ if DOWNLOAD_OUTPUT_ZIP and completed:
 """CELL: Batch video folder (FFmpeg pipe, up to 30 FPS)"""
 # @title Batch video folder (FFmpeg pipe, up to 30 FPS)
 import json
+import queue
 import shutil
 import subprocess
+import threading
 from fractions import Fraction
 from pathlib import Path
 
@@ -1211,13 +1213,16 @@ from tqdm.auto import tqdm
 
 # Assumes get_one_face() and swap_face() were initialized by earlier notebook cells.
 
-SOURCE_FACE_PATH = Path("/content/vi_0003_portrait.png")
+SOURCE_FACE_PATH = Path("/content/image_001_proc.jpg")
 INPUT_VIDEO_DIR = Path("/content/in")
-OUTPUT_VIDEO_DIR = Path("/content/outp")
+OUTPUT_VIDEO_DIR = Path("/content/outpoo")
 
-SS = 10.0
-DURATION = 10.0  # Use None for the remainder of each video.
+SS = 0.0
+DURATION = 2.0  # Use None for the remainder of each video.
 MAX_PROCESS_FPS = 30.0  # Preserve lower FPS; cap higher-FPS inputs at this value.
+MAX_PROCESS_WIDTH = 420  # Preserve aspect ratio; never upscale smaller inputs.
+DECODE_QUEUE_SIZE = 6
+ENCODE_QUEUE_SIZE = 6
 SHORT_VIDEO_SS_POLICY = "start"  # "start" processes short clips from 0; "skip" rejects them.
 
 RECURSIVE = True
@@ -1237,6 +1242,10 @@ VIDEO_EXTENSIONS = {
 
 if MAX_PROCESS_FPS <= 0:
     raise ValueError("MAX_PROCESS_FPS must be positive.")
+if MAX_PROCESS_WIDTH <= 0:
+    raise ValueError("MAX_PROCESS_WIDTH must be positive.")
+if DECODE_QUEUE_SIZE <= 0 or ENCODE_QUEUE_SIZE <= 0:
+    raise ValueError("Pipeline queue sizes must be positive.")
 
 if SS < 0:
     raise ValueError("SS cannot be negative.")
@@ -1390,7 +1399,15 @@ def read_exact(stream, byte_count):
     return data if len(data) == byte_count else b""
 
 
-def decoder_command(input_path, use_cuda, start_seconds, clip_duration, process_fps):
+def decoder_command(
+    input_path,
+    use_cuda,
+    start_seconds,
+    clip_duration,
+    process_fps,
+    process_width,
+    process_height,
+):
     command = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
     if use_cuda:
         command.extend(["-hwaccel", "cuda"])
@@ -1403,7 +1420,11 @@ def decoder_command(input_path, use_cuda, start_seconds, clip_duration, process_
         [
             "-map", "0:v:0",
             "-an", "-sn", "-dn",
-            "-vf", f"fps={process_fps:.12g}",
+            "-vf",
+            (
+                f"fps={process_fps:.12g},"
+                f"scale={process_width}:{process_height}"
+            ),
             "-vsync", "0",
             "-f", "rawvideo",
             "-pix_fmt", "bgr24",
@@ -1413,9 +1434,25 @@ def decoder_command(input_path, use_cuda, start_seconds, clip_duration, process_
     return command
 
 
-def start_decoder(input_path, use_cuda, start_seconds, clip_duration, process_fps):
+def start_decoder(
+    input_path,
+    use_cuda,
+    start_seconds,
+    clip_duration,
+    process_fps,
+    process_width,
+    process_height,
+):
     return subprocess.Popen(
-        decoder_command(input_path, use_cuda, start_seconds, clip_duration, process_fps),
+        decoder_command(
+            input_path,
+            use_cuda,
+            start_seconds,
+            clip_duration,
+            process_fps,
+            process_width,
+            process_height,
+        ),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         bufsize=10**8,
@@ -1459,8 +1496,15 @@ def encoder_command(input_path, output_path, width, height, fps, start_seconds, 
 
 def process_video(input_path, output_path):
     info = probe_video(input_path)
-    width = info["width"]
-    height = info["height"]
+    source_width = info["width"]
+    source_height = info["height"]
+    width_scale = min(1.0, MAX_PROCESS_WIDTH / source_width)
+    width = max(2, int(source_width * width_scale) // 2 * 2)
+    height = max(2, round(source_height * width / source_width / 2) * 2)
+    print(
+        f"  Resolution: {source_width}x{source_height} input -> "
+        f"{width}x{height} processing/output"
+    )
     source_fps = info["fps"]
     fps = min(source_fps, MAX_PROCESS_FPS)
     print(f"  FPS: {source_fps:.3f} input -> {fps:.3f} processing/output")
@@ -1505,9 +1549,25 @@ def process_video(input_path, output_path):
     processed_frames = 0
     fallback_frames = 0
     stopped_decoder_early = False
+    decoder_thread = None
+    encoder_thread = None
+    decoder_stop = threading.Event()
+    thread_errors = queue.Queue()
+    decode_queue = queue.Queue(maxsize=DECODE_QUEUE_SIZE)
+    encode_queue = queue.Queue(maxsize=ENCODE_QUEUE_SIZE)
+    decode_sentinel = object()
+    encode_sentinel = object()
 
     try:
-        decoder = start_decoder(input_path, USE_CUDA_DECODE, effective_ss, requested_duration, fps)
+        decoder = start_decoder(
+            input_path,
+            USE_CUDA_DECODE,
+            effective_ss,
+            requested_duration,
+            fps,
+            width,
+            height,
+        )
         raw_frame = read_exact(decoder.stdout, frame_bytes)
 
         if not raw_frame and USE_CUDA_DECODE:
@@ -1516,7 +1576,15 @@ def process_video(input_path, output_path):
             print(f"⚠ CUDA decode unavailable for {input_path.name}; using software decode.")
             if cuda_error.strip():
                 print(cuda_error[-1000:])
-            decoder = start_decoder(input_path, False, effective_ss, requested_duration, fps)
+            decoder = start_decoder(
+                input_path,
+                False,
+                effective_ss,
+                requested_duration,
+                fps,
+                width,
+                height,
+            )
             raw_frame = read_exact(decoder.stdout, frame_bytes)
 
         if not raw_frame:
@@ -1553,7 +1621,85 @@ def process_video(input_path, output_path):
             leave=True,
         )
 
-        while raw_frame:
+        def put_decode_item(item):
+            while not decoder_stop.is_set():
+                try:
+                    decode_queue.put(item, timeout=0.1)
+                    return True
+                except queue.Full:
+                    continue
+            return False
+
+        def decoder_worker():
+            try:
+                next_frame = raw_frame
+                while next_frame and not decoder_stop.is_set():
+                    if not put_decode_item(next_frame):
+                        return
+                    next_frame = read_exact(decoder.stdout, frame_bytes)
+                if not decoder_stop.is_set():
+                    put_decode_item(decode_sentinel)
+            except BaseException as error:
+                thread_errors.put(("decoder", error))
+                put_decode_item(decode_sentinel)
+
+        def encoder_worker():
+            try:
+                while True:
+                    encoded_frame = encode_queue.get()
+                    if encoded_frame is encode_sentinel:
+                        return
+                    encoder.stdin.write(encoded_frame)
+            except BaseException as error:
+                thread_errors.put(("encoder", error))
+
+        def raise_thread_error():
+            try:
+                stage, error = thread_errors.get_nowait()
+            except queue.Empty:
+                return
+            raise RuntimeError(f"{stage.capitalize()} pipeline failed: {error}") from error
+
+        def get_decoded_frame():
+            while True:
+                raise_thread_error()
+                try:
+                    return decode_queue.get(timeout=0.1)
+                except queue.Empty:
+                    if not decoder_thread.is_alive():
+                        raise_thread_error()
+                        return decode_sentinel
+
+        def queue_encoded_frame(encoded_frame):
+            while True:
+                raise_thread_error()
+                if not encoder_thread.is_alive():
+                    raise_thread_error()
+                    raise RuntimeError("Encoder pipeline stopped unexpectedly.")
+                try:
+                    encode_queue.put(encoded_frame, timeout=0.1)
+                    return
+                except queue.Full:
+                    continue
+
+        decoder_thread = threading.Thread(
+            target=decoder_worker,
+            name=f"decoder-{input_path.stem}",
+            daemon=True,
+        )
+        encoder_thread = threading.Thread(
+            target=encoder_worker,
+            name=f"encoder-{input_path.stem}",
+            daemon=True,
+        )
+        decoder_thread.start()
+        encoder_thread.start()
+
+        while True:
+            raw_frame = get_decoded_frame()
+            if raw_frame is decode_sentinel:
+                break
+
             frame = np.frombuffer(raw_frame, dtype=np.uint8).reshape((height, width, 3))
 
             try:
@@ -1574,11 +1720,7 @@ def process_video(input_path, output_path):
                     interpolation=cv2.INTER_LINEAR,
                 )
 
-            try:
-                encoder.stdin.write(np.ascontiguousarray(output_frame).tobytes())
-            except BrokenPipeError:
-                encode_error = encoder.stderr.read().decode("utf-8", errors="replace")
-                raise RuntimeError("FFmpeg encoder pipe closed:\n" + encode_error[-4000:])
+            queue_encoded_frame(np.ascontiguousarray(output_frame).tobytes())
 
             processed_frames += 1
             progress.update(1)
@@ -1587,16 +1729,34 @@ def process_video(input_path, output_path):
                 stopped_decoder_early = True
                 break
 
-            raw_frame = read_exact(decoder.stdout, frame_bytes)
-
         if processed_frames == 0:
             raise RuntimeError(f"No frames processed: {input_path}")
+
+        decoder_stop.set()
+        if stopped_decoder_early and decoder.poll() is None:
+            decoder.terminate()
+        decoder_thread.join(timeout=5)
+        if decoder_thread.is_alive():
+            raise RuntimeError("Decoder pipeline did not stop.")
+
+        while True:
+            raise_thread_error()
+            if not encoder_thread.is_alive():
+                raise_thread_error()
+                raise RuntimeError("Encoder pipeline stopped unexpectedly.")
+            try:
+                encode_queue.put(encode_sentinel, timeout=0.1)
+                break
+            except queue.Full:
+                continue
+        encoder_thread.join(timeout=30)
+        if encoder_thread.is_alive():
+            raise RuntimeError("Encoder pipeline did not finish.")
+        raise_thread_error()
 
         encoder.stdin.close()
         encoder.stdin = None
 
-        if stopped_decoder_early and decoder.poll() is None:
-            decoder.terminate()
         if decoder.stdout is not None:
             decoder.stdout.close()
         decoder.wait()
@@ -1611,6 +1771,22 @@ def process_video(input_path, output_path):
             raise RuntimeError("FFmpeg decode failed:\n" + decode_error[-4000:])
 
     finally:
+        decoder_stop.set()
+
+        if decoder is not None and decoder.poll() is None:
+            decoder.terminate()
+        if decoder_thread is not None and decoder_thread.is_alive():
+            decoder_thread.join(timeout=5)
+
+        if encoder_thread is not None and encoder_thread.is_alive():
+            if encoder is not None and encoder.poll() is None:
+                encoder.terminate()
+            try:
+                encode_queue.put_nowait(encode_sentinel)
+            except queue.Full:
+                pass
+            encoder_thread.join(timeout=5)
+
         if progress is not None:
             progress.close()
 
