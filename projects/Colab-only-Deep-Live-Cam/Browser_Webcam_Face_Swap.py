@@ -24,11 +24,11 @@ This notebook captures your webcam directly in the browser, processes frames on 
 
 # %% [code] cell=2 id=install-deps
 """CELL: %%capture"""
-%%capture
-!pip install huggingface_hub
-!pip install onnxruntime-gpu==1.20.1 #--extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/
-!pip install insightface #==0.7.3
-!pip install fastrtc
+# @title Install dependencies
+%pip install --no-cache-dir "numpy<2" insightface==0.7.3 pyzmq tqdm
+%pip uninstall -y onnxruntime onnxruntime-gpu
+%pip  install huggingface_hub
+%pip  install onnxruntime-gpu==1.20.1 #--extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/
 # %% [markdown] cell=3 id=verify
 """MARKDOWN
 ## 2. Verify GPU
