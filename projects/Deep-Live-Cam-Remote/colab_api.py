@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import io
 import json
+import mimetypes
 import queue
 import threading
 import time
@@ -15,7 +16,8 @@ from typing import Any
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 import colab_batch
@@ -33,6 +35,9 @@ LOCAL_PHOTOS_DIR = LOCAL_ROOT / "photos"
 LOCAL_VIDEOS_DIR = LOCAL_ROOT / "videos"
 LOCAL_OUTPUT_PHOTOS_DIR = Path("/content/outputs/photos")
 LOCAL_OUTPUT_VIDEOS_DIR = Path("/content/outputs/videos")
+
+OUTPUT_IMAGE_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".webp"}
+OUTPUT_VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm"}
 
 
 class JobRequest(BaseModel):
@@ -159,6 +164,36 @@ def upload_destination(kind: str, filename: str | None) -> tuple[Path, dict[str,
     raise ValueError(f"unknown upload kind: {kind}")
 
 
+def output_roots(kind: str) -> tuple[list[tuple[str, Path]], set[str]]:
+    normalized = kind.lower()
+    if normalized == "photos":
+        return [("drive", OUTPUT_PHOTOS_DIR), ("local", LOCAL_OUTPUT_PHOTOS_DIR)], OUTPUT_IMAGE_EXTENSIONS
+    if normalized == "videos":
+        return [("drive", OUTPUT_VIDEOS_DIR), ("local", LOCAL_OUTPUT_VIDEOS_DIR)], OUTPUT_VIDEO_EXTENSIONS
+    raise HTTPException(status_code=404, detail=f"unknown output kind: {kind}")
+
+
+def output_root(kind: str, source: str) -> tuple[Path, set[str]]:
+    roots, extensions = output_roots(kind)
+    for root_source, root in roots:
+        if root_source == source:
+            return root, extensions
+    raise HTTPException(status_code=404, detail=f"unknown output source: {source}")
+
+
+def safe_output_path(kind: str, source: str, relative_path: str) -> Path:
+    root, extensions = output_root(kind, source)
+    candidate = (root / relative_path).resolve()
+    root_resolved = root.resolve()
+    if candidate != root_resolved and root_resolved not in candidate.parents:
+        raise HTTPException(status_code=400, detail="invalid output path")
+    if candidate.suffix.lower() not in extensions:
+        raise HTTPException(status_code=400, detail="unsupported output file type")
+    if not candidate.is_file():
+        raise HTTPException(status_code=404, detail="output file not found")
+    return candidate
+
+
 async def write_upload(file: UploadFile, dest: Path) -> int:
     content = await file.read()
     dest.write_bytes(content)
@@ -227,6 +262,39 @@ def health() -> dict[str, Any]:
         "local_paths": ensure_local_layout(),
         "active_jobs": [job.snapshot() for job in JOBS.values() if job.status in {"queued", "running"}],
     }
+
+
+@app.get("/outputs/{kind}")
+def list_outputs(kind: str) -> dict[str, Any]:
+    ensure_drive_layout()
+    ensure_local_layout()
+    roots, extensions = output_roots(kind)
+    files: list[dict[str, Any]] = []
+    for source, root in roots:
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if not path.is_file() or path.suffix.lower() not in extensions:
+                continue
+            stat = path.stat()
+            relative_path = path.relative_to(root).as_posix()
+            files.append({
+                "name": path.name,
+                "relative_path": relative_path,
+                "source": source,
+                "size": stat.st_size,
+                "modified": stat.st_mtime,
+                "download_path": f"/outputs/{kind}/file/{source}/{relative_path}",
+            })
+    files.sort(key=lambda item: (item["modified"], item["name"]), reverse=True)
+    return {"ok": True, "kind": kind, "count": len(files), "files": files}
+
+
+@app.get("/outputs/{kind}/file/{source}/{relative_path:path}")
+def get_output_file(kind: str, source: str, relative_path: str) -> FileResponse:
+    path = safe_output_path(kind, source, relative_path)
+    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return FileResponse(path, media_type=media_type, filename=path.name)
 
 
 @app.post("/upload/file")
