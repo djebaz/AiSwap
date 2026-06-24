@@ -12,15 +12,20 @@
   <img src="media/demo.gif" alt="Demo GIF" width="800">
 </p>
 
-## Colab-native folder batch workflow
+## Colab-native folder batch workflow and Windows remote app
 
-This project variant adds a headless processor for videos that already exist at
-Colab or mounted Google Drive paths. It does **not** use browser uploads,
-Gradio/FastRTC, ZMQ, Tailscale, or a local Windows controller.
+This project variant adds a headless processor for photos/videos that already
+exist at Colab or mounted Google Drive paths, plus an optional Windows remote
+controller. The controller is remote-only: it talks to a private FastAPI server
+running in Colab over Tailscale and uses preset Google Drive folders instead of
+uploading large media through the app. The remote batch/controller path does not
+add NSFW filtering or consent-gate UI.
 
 - Notebook: `google-colab/Deep_Live_Cam_Remote_Batch.ipynb`
 - Round-trip source: `google-colab/Deep_Live_Cam_Remote_Batch.py`
-- Standalone entry point: `colab_batch.py`
+- Standalone batch entry point: `colab_batch.py`
+- Colab API entry point: `colab_api.py`
+- Windows app entry point: `run_windows_remote_app.py`
 
 ```bash
 python colab_batch.py process \
@@ -37,6 +42,36 @@ On the first run it downloads and validates `models/inswapper_128.onnx` before
 processing starts, instead of silently emitting unchanged frames.
 Use `--help` for SS/duration, multi-face, mouth mask, opacity, sharpness,
 interpolation, Poisson, color correction, and GFPGAN/GPEN options.
+
+
+### Windows remote controller
+
+1. In Colab, open `google-colab/Deep_Live_Cam_Remote_Batch.ipynb`, run the setup
+   cell, mount Drive, run the API server cell, and connect the notebook runtime
+   to Tailscale.
+2. Put files under the preset Drive layout:
+   - `/content/drive/MyDrive/DeepLiveCamRemote/source/source.png`
+   - `/content/drive/MyDrive/DeepLiveCamRemote/photos/`
+   - `/content/drive/MyDrive/DeepLiveCamRemote/videos/`
+   - outputs land under `/content/drive/MyDrive/DeepLiveCamRemote/outputs/`.
+3. On Windows, install requirements in the project `.venv`, then launch:
+
+```powershell
+Set-Location .\projects\Deep-Live-Cam-Remote
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\run_windows_remote_app.ps1
+```
+
+Enter the Colab Tailscale IP and port `7860`, then use the Photos, Videos, or
+Live tabs. Photo and video jobs mirror relative input folders under the selected
+output path. Cancel requests are graceful and stop before the next queued file.
+
+Photo CLI usage is also available directly in Colab:
+
+```bash
+python colab_batch.py photos   --source-face /content/drive/MyDrive/DeepLiveCamRemote/source/source.png   --input-dir /content/drive/MyDrive/DeepLiveCamRemote/photos   --output-dir /content/drive/MyDrive/DeepLiveCamRemote/outputs/photos
+```
 
 For identity mapping, first generate contact sheets and editable JSON:
 

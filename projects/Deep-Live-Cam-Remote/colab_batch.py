@@ -26,6 +26,7 @@ import cv2
 import numpy as np
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".mpeg", ".mpg"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 MANIFEST_NAME = ".deep_live_cam_processed.json"
 REPORT_NAME = "batch_report.json"
 ENGINE_VERSION = "deep-live-cam-remote-v1"
@@ -113,6 +114,11 @@ def processing_geometry(width: int, height: int, source_fps: float, max_width: i
 def discover_videos(root: Path, recursive: bool = True) -> list[Path]:
     iterator = root.rglob("*") if recursive else root.glob("*")
     return sorted(path for path in iterator if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS)
+
+
+def discover_images(root: Path, recursive: bool = True) -> list[Path]:
+    iterator = root.rglob("*") if recursive else root.glob("*")
+    return sorted(path for path in iterator if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS)
 
 
 def read_exact(stream: Any, size: int) -> bytes:
@@ -571,7 +577,11 @@ def process_batch(args: argparse.Namespace) -> int:
     report: dict[str, Any] = {"engine": ENGINE_VERSION, "config_signature": signature, "completed": [], "skipped": [], "failed": []}
     suffix = f"_ss{config.ss:g}" if config.ss else ""
     if config.duration is not None: suffix += f"_dur{config.duration:g}"
+    cancel_event = getattr(args, "cancel_event", None)
     for number, video in enumerate(videos, 1):
+        if cancel_event is not None and cancel_event.is_set():
+            print("  cancel requested; stopping before next video")
+            break
         relative = video.relative_to(config.input_dir).as_posix()
         output = config.output_dir / Path(relative).parent / f"{video.stem}_face_swapped{suffix}.mp4"
         key = manifest_key(video, config.input_dir, signature)
@@ -601,6 +611,74 @@ def process_batch(args: argparse.Namespace) -> int:
     return 1 if report["failed"] else 0
 
 
+def process_image_one(path: Path, output: Path, relative: str, config: ProcessConfig, engine: ModernEngine) -> dict[str, Any]:
+    frame = cv2.imread(str(path))
+    if frame is None:
+        raise RuntimeError(f"Could not read image: {path}")
+    engine.reset_video_state()
+    started = time.monotonic()
+    result = engine.process(frame.copy(), relative)
+    if result is None:
+        result = frame
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.unlink(missing_ok=True)
+    if not cv2.imwrite(str(output), np.ascontiguousarray(result)):
+        raise RuntimeError(f"Could not write image: {output}")
+    return {"width": int(result.shape[1]), "height": int(result.shape[0]), "seconds": time.monotonic() - started, "size_mb": output.stat().st_size / 1048576}
+
+
+def process_photos(args: argparse.Namespace) -> int:
+    config = ProcessConfig(
+        input_dir=Path(args.input_dir), output_dir=Path(args.output_dir),
+        source_face=Path(args.source_face) if args.source_face else None,
+        map_config=Path(args.map_config) if args.map_config else None,
+        recursive=args.recursive, overwrite=args.overwrite, skip_processed=args.skip_processed,
+        many_faces=args.many_faces, opacity=args.opacity, sharpness=args.sharpness,
+        mouth_mask_size=args.mouth_mask_size, poisson_blend=args.poisson_blend,
+        color_correction=args.color_correction, interpolation_weight=args.interpolation_weight,
+        enhancer=args.enhancer,
+    )
+    if not config.input_dir.is_dir(): raise NotADirectoryError(config.input_dir)
+    if config.source_face and not config.source_face.is_file(): raise FileNotFoundError(config.source_face)
+    if config.map_config and not config.map_config.is_file(): raise FileNotFoundError(config.map_config)
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+    images = discover_images(config.input_dir, config.recursive)
+    if not images: raise FileNotFoundError(f"No images found in {config.input_dir}")
+    engine = ModernEngine(config)
+    signature = config_signature(config)
+    manifest_path = config.output_dir / MANIFEST_NAME
+    manifest = load_json(manifest_path, {"version": 1, "items": {}})
+    items = manifest.setdefault("items", {})
+    report: dict[str, Any] = {"engine": ENGINE_VERSION, "config_signature": signature, "completed": [], "skipped": [], "failed": []}
+    cancel_event = getattr(args, "cancel_event", None)
+    for number, image in enumerate(images, 1):
+        if cancel_event is not None and cancel_event.is_set():
+            print("  cancel requested; stopping before next image")
+            break
+        relative = image.relative_to(config.input_dir).as_posix()
+        output = config.output_dir / Path(relative).parent / f"{image.stem}_face_swapped{image.suffix.lower()}"
+        key = manifest_key(image, config.input_dir, signature)
+        print(f"\n[{number}/{len(images)}] {relative}")
+        if not config.overwrite and config.skip_processed and key in items and Path(items[key].get("output", "")).is_file():
+            print("  skipped: matching input + source/model/config manifest entry")
+            report["skipped"].append(relative); continue
+        try:
+            result = process_image_one(image, output, relative, config, engine)
+            record = {"input": relative, "output": str(output), **result}
+            report["completed"].append(record)
+            items[key] = {**record, "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+            atomic_json(manifest_path, manifest)
+            print(f"  done: {output} ({result['size_mb']:.1f} MB)")
+        except Exception as exc:
+            output.unlink(missing_ok=True)
+            report["failed"].append({"input": relative, "error": str(exc)})
+            print(f"  FAILED: {exc}")
+    report_path = config.output_dir / REPORT_NAME
+    atomic_json(report_path, report)
+    print(f"\nCompleted {len(report['completed'])}; skipped {len(report['skipped'])}; failed {len(report['failed'])}")
+    return 1 if report["failed"] else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -609,27 +687,34 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--sample-seconds", type=float, default=1.0); scan.add_argument("--max-samples", type=int, default=300)
     scan.add_argument("--cluster-threshold", type=float, default=0.55); scan.add_argument("--match-threshold", type=float, default=0.35)
     scan.add_argument("--recursive", action=argparse.BooleanOptionalAction, default=True); scan.set_defaults(func=scan_identities)
+    def add_common_process_args(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--source-face"); command.add_argument("--input-dir", required=True); command.add_argument("--output-dir", required=True)
+        command.add_argument("--map-config")
+        command.add_argument("--recursive", action=argparse.BooleanOptionalAction, default=True)
+        command.add_argument("--overwrite", action=argparse.BooleanOptionalAction, default=False)
+        command.add_argument("--skip-processed", action=argparse.BooleanOptionalAction, default=True)
+        command.add_argument("--many-faces", action=argparse.BooleanOptionalAction, default=False)
+        command.add_argument("--opacity", type=float, default=1.0); command.add_argument("--sharpness", type=float, default=0.0)
+        command.add_argument("--mouth-mask-size", type=float, default=0.0)
+        command.add_argument("--poisson-blend", action=argparse.BooleanOptionalAction, default=False)
+        command.add_argument("--color-correction", action=argparse.BooleanOptionalAction, default=False)
+        command.add_argument("--interpolation-weight", type=float, default=0.0)
+        command.add_argument("--enhancer", choices=["none", "gfpgan", "gpen256", "gpen512"], default="none")
+
     process = subparsers.add_parser("process", help="process every input video through the modern engine")
-    process.add_argument("--source-face"); process.add_argument("--input-dir", required=True); process.add_argument("--output-dir", required=True)
-    process.add_argument("--map-config"); process.add_argument("--zip-output")
+    add_common_process_args(process)
+    process.add_argument("--zip-output")
     process.add_argument("--ss", type=float, default=0.0); process.add_argument("--duration", type=float)
     process.add_argument("--max-fps", type=float, default=30.0); process.add_argument("--max-width", type=int, default=420)
     process.add_argument("--decode-queue", type=int, default=6); process.add_argument("--encode-queue", type=int, default=6)
-    process.add_argument("--recursive", action=argparse.BooleanOptionalAction, default=True)
-    process.add_argument("--overwrite", action=argparse.BooleanOptionalAction, default=False)
-    process.add_argument("--skip-processed", action=argparse.BooleanOptionalAction, default=True)
     process.add_argument("--short-video-policy", choices=["start", "skip"], default="start")
     process.add_argument("--cuda-decode", action=argparse.BooleanOptionalAction, default=True)
     process.add_argument("--encoder", choices=["auto", "h264_nvenc", "libx264"], default="auto")
     process.add_argument("--preset", default="p4"); process.add_argument("--quality", type=int, default=18)
-    process.add_argument("--many-faces", action=argparse.BooleanOptionalAction, default=False)
-    process.add_argument("--opacity", type=float, default=1.0); process.add_argument("--sharpness", type=float, default=0.0)
-    process.add_argument("--mouth-mask-size", type=float, default=0.0)
-    process.add_argument("--poisson-blend", action=argparse.BooleanOptionalAction, default=False)
-    process.add_argument("--color-correction", action=argparse.BooleanOptionalAction, default=False)
-    process.add_argument("--interpolation-weight", type=float, default=0.0)
-    process.add_argument("--enhancer", choices=["none", "gfpgan", "gpen256", "gpen512"], default="none")
     process.set_defaults(func=process_batch)
+    photos = subparsers.add_parser("photos", help="process every input image through the modern engine")
+    add_common_process_args(photos)
+    photos.set_defaults(func=process_photos)
     return parser
 
 
