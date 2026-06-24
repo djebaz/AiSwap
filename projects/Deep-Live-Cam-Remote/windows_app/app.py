@@ -262,6 +262,7 @@ class MainWindow(QMainWindow):
         form.addRow("Drive root", self.drive_root)
         layout.addLayout(form)
         self.setup_help = QTextEdit(readOnly=True)
+        self.setup_help.setObjectName("helpText")
         self.setup_help.setPlainText(
             "Colab setup checklist:\n"
             "1. Open google-colab/Deep_Live_Cam_Remote_Batch.ipynb.\n"
@@ -272,8 +273,12 @@ class MainWindow(QMainWindow):
         )
         layout.addWidget(self.setup_help)
         row = QHBoxLayout()
-        btn = QPushButton("Check connection"); btn.clicked.connect(self.check_connection)
-        save = QPushButton("Save settings"); save.clicked.connect(lambda: (self.sync_settings(), self.log("settings saved")))
+        btn = QPushButton("Check connection")
+        btn.setObjectName("primaryButton")
+        btn.clicked.connect(self.check_connection)
+        save = QPushButton("Save settings")
+        save.setObjectName("successButton")
+        save.clicked.connect(lambda: (self.sync_settings(), self.log("settings saved")))
         row.addWidget(btn); row.addWidget(save); row.addStretch(1)
         layout.addLayout(row)
         self.tabs.addTab(tab, "Setup")
@@ -304,7 +309,9 @@ class MainWindow(QMainWindow):
         form.addRow("Photos input path", self.photos_input)
         form.addRow("Photos output path", self.photos_output)
         layout.addLayout(form)
-        btn = QPushButton("Start photo batch"); btn.clicked.connect(self.start_photos)
+        btn = QPushButton("Start photo batch")
+        btn.setObjectName("primaryButton")
+        btn.clicked.connect(self.start_photos)
         layout.addWidget(btn); layout.addStretch(1)
         self.tabs.addTab(tab, "Photos")
 
@@ -322,8 +329,12 @@ class MainWindow(QMainWindow):
         form.addRow("Max width", self.max_width)
         form.addRow("Quality", self.quality)
         layout.addLayout(form)
-        btn = QPushButton("Start video batch"); btn.clicked.connect(self.start_videos)
-        cancel = QPushButton("Graceful cancel active job"); cancel.clicked.connect(self.cancel_job)
+        btn = QPushButton("Start video batch")
+        btn.setObjectName("primaryButton")
+        btn.clicked.connect(self.start_videos)
+        cancel = QPushButton("Graceful cancel active job")
+        cancel.setObjectName("dangerButton")
+        cancel.clicked.connect(self.cancel_job)
         row = QHBoxLayout(); row.addWidget(btn); row.addWidget(cancel); row.addStretch(1)
         layout.addLayout(row); layout.addStretch(1)
         self.tabs.addTab(tab, "Videos")
@@ -337,6 +348,7 @@ class MainWindow(QMainWindow):
         form.addRow("Virtual camera", self.virtual_camera)
         layout.addLayout(form)
         self.live_note = QLabel("Live sends webcam JPEG frames to ws://HOST:PORT/ws/live, previews returned frames, and opens the configured virtual camera when pyvirtualcam can find it.")
+        self.live_note.setObjectName("statusLabel")
         self.live_note.setWordWrap(True)
         layout.addWidget(self.live_note)
         self.live_preview = QLabel("Live preview")
@@ -345,7 +357,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.live_preview)
         row = QHBoxLayout()
         start = QPushButton("Start live")
+        start.setObjectName("successButton")
         stop = QPushButton("Stop live")
+        stop.setObjectName("dangerButton")
         start.clicked.connect(self.start_live)
         stop.clicked.connect(self.stop_live)
         row.addWidget(start); row.addWidget(stop); row.addStretch(1)
@@ -421,6 +435,12 @@ class MainWindow(QMainWindow):
 
 def main() -> int:
     app = QApplication([])
+
+    # Load dark theme stylesheet
+    qss_path = Path(__file__).parent / "dark_theme.qss"
+    if qss_path.exists():
+        app.setStyleSheet(qss_path.read_text(encoding="utf-8"))
+
     window = MainWindow()
     window.show()
     return app.exec()

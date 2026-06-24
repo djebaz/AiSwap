@@ -45,44 +45,37 @@
 - The remote app/backend is intentionally remote-only and does not add NSFW filtering, consent modals, or safety-gate UI.
 - Photo batches use `python colab_batch.py photos ...`; video batches use `python colab_batch.py process ...`. Keep output paths mirrored relative to the selected input root.
 
-## Notebook Round-Trip: Use `$ipynb-roundtrip`
+## Notebook Round-Trip
 
-Use the `$ipynb-roundtrip` skill whenever working with `.ipynb` files and markerized `.py` notebook sources in this repo, especially the `Deep_Live_Cam_Remote_Batch.py` / `.ipynb` pair.
+The `Deep_Live_Cam_Remote_Batch.ipynb` Colab notebook uses git clone to fetch the latest code from this repository. Changes to the notebook structure should be made in the markerized `.py` source and rebuilt to `.ipynb`.
+
+**Key change**: The notebook no longer embeds the Python source code as a bundle. Instead, it clones the repository directly from GitHub during the setup cell.
 
 Rules:
 
-- Edit the markerized `.py` source for deterministic diffs; rebuild the `.ipynb` before handing work to Colab.
+- Edit the markerized `.py` source (`Deep_Live_Cam_Remote_Batch.py`) for deterministic diffs; rebuild the `.ipynb` before committing.
 - After edits made in Colab or directly in an `.ipynb`, export back to markerized `.py` and review the diff.
-- Preserve cell ids, marker lines, `meta_b64`, `NOTEBOOK_META_B64`, `MARKDOWN` / `ENDMARKDOWN`, and `RAW` / `ENDRAW` sentinels. Do not hand-edit notebook markers unless the task explicitly requires marker repair.
-- Keep generated embedded-source payloads readable in `.py` with `# IPYNB_EMBED_B64_FROM_CELL ...`; do not paste generated base64 into markerized sources.
+- Preserve cell ids, marker lines, `meta_b64`, `NOTEBOOK_META_B64`, `MARKDOWN` / `ENDMARKDOWN`, and `RAW` / `ENDRAW` sentinels.
 - Remove throwaway round-trip files such as `_roundtrip.py`, `_roundtrip.ipynb`, or temp notebooks after validation unless the user asks to keep them.
 - Run conversions from the repo root when possible, then check `git diff`.
 
-Default commands from `$ipynb-roundtrip`:
+Commands for the remote batch notebook:
 
 ```powershell
-# Notebook -> markerized py
-python scripts/ipynb_to_py.py input.ipynb output_notebook.py --eol auto
-
-# Markerized py -> notebook
-python scripts/py_to_ipynb.py output_notebook.py roundtrip.ipynb --eol auto
-```
-
-For the remote batch notebook pair, use paths like:
-
-```powershell
+# Markerized py -> notebook (after editing the .py source)
 python scripts/py_to_ipynb.py `
   .\projects\Deep-Live-Cam-Remote\google-colab\Deep_Live_Cam_Remote_Batch.py `
   .\projects\Deep-Live-Cam-Remote\google-colab\Deep_Live_Cam_Remote_Batch.ipynb `
   --eol auto
 
+# Notebook -> markerized py (if edited in Colab)
 python scripts/ipynb_to_py.py `
   .\projects\Deep-Live-Cam-Remote\google-colab\Deep_Live_Cam_Remote_Batch.ipynb `
   .\projects\Deep-Live-Cam-Remote\google-colab\Deep_Live_Cam_Remote_Batch.py `
   --eol auto
 ```
 
-If `scripts/ipynb_to_py.py` or `scripts/py_to_ipynb.py` are missing, do not improvise a lossy conversion. Use the `$ipynb-roundtrip` skill instructions/scripts or add the expected converter scripts first, then rerun the same workflow.
+**Important**: Since the notebook clones from GitHub, you must push changes to the main branch before running the notebook in Colab for the first time. The notebook clones from `https://github.com/djebaz/AiSwap.git` branch `main`.
 
 ## Context7 Documentation Rule
 
