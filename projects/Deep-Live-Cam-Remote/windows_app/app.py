@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QThread, QTimer, Qt, QUrl, Signal
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -344,6 +344,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         set_dark_title_bar(self)
+        icon_path = Path(__file__).parent / "icon.ico"
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
         self.settings = load_settings()
         self.client = ApiClient(self.settings)
         self.poller: PollWorker | None = None
