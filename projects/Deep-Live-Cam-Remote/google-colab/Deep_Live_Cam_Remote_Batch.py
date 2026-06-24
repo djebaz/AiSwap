@@ -243,7 +243,97 @@ files.download(ZIP_PATH)
 Run this after connecting Colab to Tailscale. The Windows app connects to `http://TAILSCALE_IP:7860`.
 """ENDMARKDOWN
 
-# %% [code] cell=13 id=start-api
+# %% [markdown] cell=13 id=tailscale-setup-heading
+"""MARKDOWN
+### 6a. Install and configure Tailscale
+Run these cells to set up secure private networking. Click the auth URL to add this Colab instance to your Tailscale network.
+"""ENDMARKDOWN
+
+# %% [code] cell=14 id=tailscale-install
+"""CELL: Install Tailscale"""
+# @title Install Tailscale
+import subprocess
+import sys
+
+print("Installing Tailscale...")
+result = subprocess.run(
+    ["curl", "-fsSL", "https://tailscale.com/install.sh"],
+    capture_output=True,
+    text=True
+)
+if result.returncode == 0:
+    install_result = subprocess.run(
+        ["sh", "-c", result.stdout],
+        capture_output=True,
+        text=True
+    )
+    if install_result.returncode == 0:
+        print("✓ Tailscale installed successfully")
+    else:
+        print(f"Installation error: {install_result.stderr}")
+        sys.exit(1)
+else:
+    print(f"Download error: {result.stderr}")
+    sys.exit(1)
+
+# %% [code] cell=15 id=tailscale-auth
+"""CELL: Authenticate Tailscale"""
+# @title Start Tailscale and authenticate
+import subprocess
+
+print("Starting Tailscale...")
+print("\n" + "="*70)
+print("IMPORTANT: Click the authentication URL below to authorize this Colab")
+print("="*70 + "\n")
+
+result = subprocess.run(
+    ["sudo", "tailscale", "up", "--hostname=colab-dlc-remote"],
+    capture_output=True,
+    text=True
+)
+
+# Output contains the auth URL
+output = result.stdout + result.stderr
+print(output)
+
+if "https://login.tailscale.com" in output:
+    print("\n" + "="*70)
+    print("After clicking the link above and authorizing:")
+    print("1. Run the next cell to get your Tailscale IP")
+    print("2. Then run the 'Start private API server' cell")
+    print("="*70)
+
+# %% [code] cell=16 id=tailscale-ip
+"""CELL: Display Tailscale IP"""
+# @title Get Tailscale IP address
+import subprocess
+
+result = subprocess.run(
+    ["tailscale", "ip", "-4"],
+    capture_output=True,
+    text=True
+)
+
+if result.returncode == 0:
+    tailscale_ip = result.stdout.strip()
+    print("="*70)
+    print(f"✓ Your Colab Tailscale IP: {tailscale_ip}")
+    print("="*70)
+    print(f"\nUse this in your Windows app: http://{tailscale_ip}:7860")
+    print("\nNow run the 'Start private API server' cell below.")
+else:
+    print("Error getting Tailscale IP. Make sure you:")
+    print("1. Ran the 'Install Tailscale' cell")
+    print("2. Clicked the auth URL in the 'Authenticate Tailscale' cell")
+    print("3. Authorized the Colab instance in your Tailscale admin panel")
+
+# %% [markdown] cell=17 id=start-api-heading
+"""MARKDOWN
+### 6b. Start the API server
+Run this cell after Tailscale is configured and you have your IP address.
+"""ENDMARKDOWN
+
+# %% [code] cell=18 id=start-api
 """CELL: Start private API server"""
 # @title Start private API server
 import sys
@@ -276,12 +366,12 @@ print("✓ The server is running in the background")
 print("✓ Connect your Tailscale network and use the Tailscale IP with the Windows app")
 print("\nPress Ctrl+C or stop the cell to terminate the server.")
 
-# %% [markdown] cell=14 id=photos-heading
+# %% [markdown] cell=19 id=photos-heading
 """MARKDOWN
 ## 7. Optional: run photo batch directly in Colab
 """ENDMARKDOWN
 
-# %% [code] cell=15 id=photos
+# %% [code] cell=20 id=photos
 """CELL: Run photo batch processor"""
 # @title Run photo batch processor
 from colab_batch import main
