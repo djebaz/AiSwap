@@ -11,22 +11,22 @@ Self-contained, path-based photo/video batch face swap with an optional private 
 ## Quick Start
 
 **For batch processing (most common):**
-1. Mount Google Drive (section 1)
+1. Mount Google Drive (section 1 - optional but recommended)
 2. Clone repository and install dependencies (section 2)
 3. Upload your source face image to: `MyDrive/DeepLiveCamRemote/source/source.png`
 4. Upload videos to: `MyDrive/DeepLiveCamRemote/videos/`
 5. Configure settings (section 3)
-6. Run batch processor (section 4)
-7. Download results (section 5)
+6. Run batch processor (section 5)
+7. Download results (section 6)
 
 **For Windows remote app:**
-1. Complete sections 1-2 above
-2. Install Tailscale (section 6a)
-3. Start API server (section 6b)
+1. Clone repository and install dependencies (section 2) - skip Drive mount
+2. Install Tailscale (section 7a)
+3. Start API server (section 7b)
 4. Use the displayed IP in your Windows app
 
 **For photo batches in Colab:**
-- Follow sections 1-3, then run section 7
+- Mount Drive (section 1), clone repo (section 2), configure (section 3), then run section 8
 """ENDMARKDOWN
 
 # %% [markdown] cell=1 id=mount-heading
