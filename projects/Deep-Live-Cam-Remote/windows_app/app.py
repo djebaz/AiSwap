@@ -69,6 +69,12 @@ class AppSettings:
     skip_processed: bool = True
     many_faces: bool = False
     enhancer: str = "none"
+    opacity: float = 1.0
+    sharpness: float = 0.0
+    mouth_mask_size: float = 0.0
+    interpolation_weight: float = 0.0
+    poisson_blend: bool = False
+    color_correction: bool = False
     max_fps: float = 30.0
     max_width: int = 420
     quality: int = 18
@@ -217,6 +223,12 @@ def job_payload(settings: AppSettings, input_dir: str, output_dir: str, source_f
         "skip_processed": settings.skip_processed,
         "many_faces": settings.many_faces,
         "enhancer": settings.enhancer,
+        "opacity": settings.opacity,
+        "sharpness": settings.sharpness,
+        "mouth_mask_size": settings.mouth_mask_size,
+        "interpolation_weight": settings.interpolation_weight,
+        "poisson_blend": settings.poisson_blend,
+        "color_correction": settings.color_correction,
         "max_fps": settings.max_fps,
         "max_width": settings.max_width,
         "quality": settings.quality,
@@ -404,6 +416,12 @@ class MainWindow(QMainWindow):
         self.settings.skip_processed = self.skip_processed.isChecked()
         self.settings.many_faces = self.many_faces.isChecked()
         self.settings.enhancer = self.enhancer.currentText()
+        self.settings.opacity = float(self.opacity.value())
+        self.settings.sharpness = float(self.sharpness.value())
+        self.settings.mouth_mask_size = float(self.mouth_mask_size.value())
+        self.settings.interpolation_weight = float(self.interpolation_weight.value())
+        self.settings.poisson_blend = self.poisson_blend.isChecked()
+        self.settings.color_correction = self.color_correction.isChecked()
         self.settings.max_fps = float(self.max_fps.value())
         self.settings.max_width = int(self.max_width.value())
         self.settings.quality = int(self.quality.value())
@@ -455,12 +473,24 @@ class MainWindow(QMainWindow):
         self.skip_processed = QCheckBox(); self.skip_processed.setChecked(self.settings.skip_processed)
         self.many_faces = QCheckBox(); self.many_faces.setChecked(self.settings.many_faces)
         self.enhancer = QComboBox(); self.enhancer.addItems(["none", "gfpgan", "gpen256", "gpen512"]); self.enhancer.setCurrentText(self.settings.enhancer)
+        self.opacity = QDoubleSpinBox(); self.opacity.setRange(0.0, 1.0); self.opacity.setSingleStep(0.1); self.opacity.setValue(self.settings.opacity)
+        self.sharpness = QDoubleSpinBox(); self.sharpness.setRange(0.0, 1.0); self.sharpness.setSingleStep(0.1); self.sharpness.setValue(self.settings.sharpness)
+        self.mouth_mask_size = QDoubleSpinBox(); self.mouth_mask_size.setRange(0.0, 10.0); self.mouth_mask_size.setSingleStep(0.5); self.mouth_mask_size.setValue(self.settings.mouth_mask_size)
+        self.interpolation_weight = QDoubleSpinBox(); self.interpolation_weight.setRange(0.0, 1.0); self.interpolation_weight.setSingleStep(0.1); self.interpolation_weight.setValue(self.settings.interpolation_weight)
+        self.poisson_blend = QCheckBox(); self.poisson_blend.setChecked(self.settings.poisson_blend)
+        self.color_correction = QCheckBox(); self.color_correction.setChecked(self.settings.color_correction)
         form.addRow("Source face path", source_row)
         form.addRow("Recursive", self.recursive)
         form.addRow("Overwrite", self.overwrite)
         form.addRow("Skip processed", self.skip_processed)
         form.addRow("Many faces", self.many_faces)
         form.addRow("Enhancer", self.enhancer)
+        form.addRow("Opacity (1=full)", self.opacity)
+        form.addRow("Sharpness (0=off)", self.sharpness)
+        form.addRow("Mouth mask (0=off)", self.mouth_mask_size)
+        form.addRow("Interpolation (0=off)", self.interpolation_weight)
+        form.addRow("Poisson blend", self.poisson_blend)
+        form.addRow("Color correction", self.color_correction)
         return box
 
     def _build_photos_tab(self) -> None:

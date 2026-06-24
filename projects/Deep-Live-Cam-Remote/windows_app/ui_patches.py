@@ -224,6 +224,56 @@ def _build_videos_tab(self: base.MainWindow) -> None:
     form.addRow("Quality", self.quality)
     layout.addLayout(form)
 
+    # Common processing options (shared with Photos via linked widgets)
+    options_box = base.QGroupBox("Processing options")
+    options_form = base.QFormLayout(options_box)
+
+    # Link to Photos tab widgets - changes sync automatically via sync_settings
+    self.v_recursive = base.QCheckBox()
+    self.v_recursive.setChecked(self.settings.recursive)
+    self.v_overwrite = base.QCheckBox()
+    self.v_overwrite.setChecked(self.settings.overwrite)
+    self.v_skip_processed = base.QCheckBox()
+    self.v_skip_processed.setChecked(self.settings.skip_processed)
+    self.v_many_faces = base.QCheckBox()
+    self.v_many_faces.setChecked(self.settings.many_faces)
+    self.v_enhancer = base.QComboBox()
+    self.v_enhancer.addItems(["none", "gfpgan", "gpen256", "gpen512"])
+    self.v_enhancer.setCurrentText(self.settings.enhancer)
+    self.v_opacity = base.QDoubleSpinBox()
+    self.v_opacity.setRange(0.0, 1.0)
+    self.v_opacity.setSingleStep(0.1)
+    self.v_opacity.setValue(self.settings.opacity)
+    self.v_sharpness = base.QDoubleSpinBox()
+    self.v_sharpness.setRange(0.0, 1.0)
+    self.v_sharpness.setSingleStep(0.1)
+    self.v_sharpness.setValue(self.settings.sharpness)
+    self.v_mouth_mask_size = base.QDoubleSpinBox()
+    self.v_mouth_mask_size.setRange(0.0, 10.0)
+    self.v_mouth_mask_size.setSingleStep(0.5)
+    self.v_mouth_mask_size.setValue(self.settings.mouth_mask_size)
+    self.v_interpolation_weight = base.QDoubleSpinBox()
+    self.v_interpolation_weight.setRange(0.0, 1.0)
+    self.v_interpolation_weight.setSingleStep(0.1)
+    self.v_interpolation_weight.setValue(self.settings.interpolation_weight)
+    self.v_poisson_blend = base.QCheckBox()
+    self.v_poisson_blend.setChecked(self.settings.poisson_blend)
+    self.v_color_correction = base.QCheckBox()
+    self.v_color_correction.setChecked(self.settings.color_correction)
+
+    options_form.addRow("Recursive", self.v_recursive)
+    options_form.addRow("Overwrite", self.v_overwrite)
+    options_form.addRow("Skip processed", self.v_skip_processed)
+    options_form.addRow("Many faces", self.v_many_faces)
+    options_form.addRow("Enhancer", self.v_enhancer)
+    options_form.addRow("Opacity (1=full)", self.v_opacity)
+    options_form.addRow("Sharpness (0=off)", self.v_sharpness)
+    options_form.addRow("Mouth mask (0=off)", self.v_mouth_mask_size)
+    options_form.addRow("Interpolation (0=off)", self.v_interpolation_weight)
+    options_form.addRow("Poisson blend", self.v_poisson_blend)
+    options_form.addRow("Color correction", self.v_color_correction)
+    layout.addWidget(options_box)
+
     self.videos_start_btn = base.QPushButton("Start video batch")
     self.videos_start_btn.setObjectName("primaryButton")
     self.videos_start_btn.clicked.connect(lambda: _toggle_videos_batch(self))
@@ -670,6 +720,71 @@ def show_video_output(self: base.MainWindow, item: dict[str, Any]) -> None:
     )
 
 
+def sync_settings(self: base.MainWindow) -> None:
+    """Extended sync_settings that reads from both Photos and Videos tab widgets."""
+    self.settings.host = self.host.text().strip()
+    self.settings.port = int(self.port.value())
+    self.settings.drive_root = self.drive_root.text().strip()
+    self.settings.source_face = self.source_face.text().strip()
+    self.settings.photos_input = self.photos_input.text().strip()
+    self.settings.photos_output = self.photos_output.text().strip()
+    self.settings.videos_input = self.videos_input.text().strip()
+    self.settings.videos_output = self.videos_output.text().strip()
+    # Read from videos tab widgets if available, else photos tab
+    self.settings.recursive = getattr(self, "v_recursive", self.recursive).isChecked()
+    self.settings.overwrite = getattr(self, "v_overwrite", self.overwrite).isChecked()
+    self.settings.skip_processed = getattr(self, "v_skip_processed", self.skip_processed).isChecked()
+    self.settings.many_faces = getattr(self, "v_many_faces", self.many_faces).isChecked()
+    self.settings.enhancer = getattr(self, "v_enhancer", self.enhancer).currentText()
+    self.settings.opacity = float(getattr(self, "v_opacity", self.opacity).value())
+    self.settings.sharpness = float(getattr(self, "v_sharpness", self.sharpness).value())
+    self.settings.mouth_mask_size = float(getattr(self, "v_mouth_mask_size", self.mouth_mask_size).value())
+    self.settings.interpolation_weight = float(getattr(self, "v_interpolation_weight", self.interpolation_weight).value())
+    self.settings.poisson_blend = getattr(self, "v_poisson_blend", self.poisson_blend).isChecked()
+    self.settings.color_correction = getattr(self, "v_color_correction", self.color_correction).isChecked()
+    self.settings.max_fps = float(self.max_fps.value())
+    self.settings.max_width = int(self.max_width.value())
+    self.settings.quality = int(self.quality.value())
+    self.settings.start_pct = float(self.start_pct.value())
+    self.settings.end_pct = float(self.end_pct.value())
+    self.settings.camera_index = int(self.camera_index.value())
+    self.settings.virtual_camera = self.virtual_camera.text().strip()
+    base.save_settings(self.settings)
+    # Sync both tabs' widgets to stay consistent
+    _sync_common_widgets(self)
+
+
+def _sync_common_widgets(window: base.MainWindow) -> None:
+    """Keep Photos and Videos tab common widgets in sync."""
+    s = window.settings
+    # Update photos tab widgets
+    if hasattr(window, "recursive"):
+        window.recursive.setChecked(s.recursive)
+        window.overwrite.setChecked(s.overwrite)
+        window.skip_processed.setChecked(s.skip_processed)
+        window.many_faces.setChecked(s.many_faces)
+        window.enhancer.setCurrentText(s.enhancer)
+        window.opacity.setValue(s.opacity)
+        window.sharpness.setValue(s.sharpness)
+        window.mouth_mask_size.setValue(s.mouth_mask_size)
+        window.interpolation_weight.setValue(s.interpolation_weight)
+        window.poisson_blend.setChecked(s.poisson_blend)
+        window.color_correction.setChecked(s.color_correction)
+    # Update videos tab widgets
+    if hasattr(window, "v_recursive"):
+        window.v_recursive.setChecked(s.recursive)
+        window.v_overwrite.setChecked(s.overwrite)
+        window.v_skip_processed.setChecked(s.skip_processed)
+        window.v_many_faces.setChecked(s.many_faces)
+        window.v_enhancer.setCurrentText(s.enhancer)
+        window.v_opacity.setValue(s.opacity)
+        window.v_sharpness.setValue(s.sharpness)
+        window.v_mouth_mask_size.setValue(s.mouth_mask_size)
+        window.v_interpolation_weight.setValue(s.interpolation_weight)
+        window.v_poisson_blend.setChecked(s.poisson_blend)
+        window.v_color_correction.setChecked(s.color_correction)
+
+
 def install() -> None:
     base.MainWindow._build_setup_tab = _build_setup_tab
     base.MainWindow._build_photos_tab = _build_photos_tab
@@ -677,6 +792,7 @@ def install() -> None:
     base.MainWindow._build_outputs_tab = _build_outputs_tab
     base.MainWindow._build_live_tab = _build_live_tab
     base.MainWindow.check_connection = check_connection
+    base.MainWindow.sync_settings = sync_settings
     base.MainWindow.start_photos = start_photos
     base.MainWindow.start_videos = start_videos
     base.MainWindow.cancel_job = cancel_job
