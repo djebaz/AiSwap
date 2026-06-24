@@ -334,7 +334,12 @@ Run this after connecting Colab to Tailscale. The Windows app connects to `http:
 # %% [markdown] cell=14 id=tailscale-setup-heading
 """MARKDOWN
 ### 7a. Install and configure Tailscale
-Run these cells to set up secure private networking. Click the auth URL to add this Colab instance to your Tailscale network.
+
+**For automatic auth:** Add `TAILSCALE_AUTHKEY` to Colab secrets (get it from Tailscale admin console > Settings > Keys).
+
+**For manual auth:** If no auth key is set, you'll get a URL to click.
+
+Run these cells to set up secure private networking.
 """ENDMARKDOWN
 
 # %% [code] cell=15 id=tailscale-install
@@ -357,6 +362,20 @@ if result.returncode == 0:
     )
     if install_result.returncode == 0:
         print("✓ Tailscale installed successfully")
+
+        # Start the tailscaled daemon
+        print("Starting Tailscale daemon...")
+        daemon_result = subprocess.run(
+            ["sudo", "systemctl", "start", "tailscaled"],
+            capture_output=True,
+            text=True
+        )
+        if daemon_result.returncode == 0:
+            print("✓ Tailscale daemon started")
+        else:
+            print(f"⚠️  Daemon start warning: {daemon_result.stderr}")
+            print("Trying alternative start method...")
+            subprocess.run(["sudo", "tailscaled", "--tun=userspace-networking", "--socks5-server=localhost:1055", "--outbound-http-proxy-listen=localhost:1055", "&"], shell=True)
     else:
         print(f"Installation error: {install_result.stderr}")
         sys.exit(1)
@@ -369,27 +388,42 @@ else:
 # @title Start Tailscale and authenticate
 import subprocess
 
-print("Starting Tailscale...")
-print("\n" + "="*70)
-print("IMPORTANT: Click the authentication URL below to authorize this Colab")
-print("="*70 + "\n")
+# Check for auth key in Colab secrets
+authkey = None
+try:
+    from google.colab import userdata
+    authkey = userdata.get('TAILSCALE_AUTHKEY')
+    print("✓ Found TAILSCALE_AUTHKEY in secrets - using automatic auth")
+except Exception:
+    print("⚠️  No TAILSCALE_AUTHKEY found - using interactive auth")
 
-result = subprocess.run(
-    ["sudo", "tailscale", "up", "--hostname=colab-dlc-remote"],
-    capture_output=True,
-    text=True
-)
+print("\nStarting Tailscale...")
 
-# Output contains the auth URL
+# Build command with or without auth key
+cmd = ["sudo", "tailscale", "up", "--hostname=colab-dlc-remote"]
+if authkey:
+    cmd.append(f"--authkey={authkey}")
+
+result = subprocess.run(cmd, capture_output=True, text=True)
+
+# Output contains status or auth URL
 output = result.stdout + result.stderr
 print(output)
 
-if "https://login.tailscale.com" in output:
+if result.returncode == 0:
     print("\n" + "="*70)
-    print("After clicking the link above and authorizing:")
+    print("✓ Tailscale authentication successful!")
+    print("="*70)
+    print("\nNext: Run the cell below to get your Tailscale IP")
+elif "https://login.tailscale.com" in output:
+    print("\n" + "="*70)
+    print("IMPORTANT: Click the authentication URL above to authorize this Colab")
+    print("="*70)
+    print("\nAfter clicking the link and authorizing:")
     print("1. Run the next cell to get your Tailscale IP")
     print("2. Then run the 'Start private API server' cell")
-    print("="*70)
+else:
+    print("\n⚠️  Authentication may have failed. Check output above.")
 
 # %% [code] cell=17 id=tailscale-ip
 """CELL: Display Tailscale IP"""
