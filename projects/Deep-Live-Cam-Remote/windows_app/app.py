@@ -623,7 +623,8 @@ class MainWindow(QMainWindow):
     def show_video_output(self, item: dict[str, Any]) -> None:
         path = str(item.get("download_path") or "")
         relative = str(item.get("relative_path") or item.get("name") or "output.mp4")
-        local_name = f"{item.get('source', 'output')}_{relative.replace('/', '_').replace('\\', '_')}"
+        safe_relative = relative.replace("/", "_").replace("\\", "_")
+        local_name = f"{item.get('source', 'output')}_{safe_relative}"
         local_path = self.output_temp_dir / local_name
         self.output_status.setText(f"Loading video preview: {relative}")
         if not local_path.exists() or local_path.stat().st_size != int(item.get("size") or -1):
