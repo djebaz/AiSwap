@@ -12,6 +12,8 @@ Self-contained, path-based photo/video batch face swap with an optional private 
 # %% [markdown] cell=1 id=setup-heading
 """MARKDOWN
 ## 1. Clone repository and install dependencies
+
+**Note**: Currently clones from the `feature/windows-remote-app` branch. Change `REPO_BRANCH` to `"main"` after the PR is merged.
 """ENDMARKDOWN
 
 # %% [code] cell=2 id=setup
@@ -25,6 +27,7 @@ from pathlib import Path
 # Clone the repository with authentication support
 REPO_OWNER = "djebaz"
 REPO_NAME = "AiSwap"
+REPO_BRANCH = "feature/windows-remote-app"  # Use "main" after PR is merged
 WORK_DIR = Path("/content/Deep-Live-Cam-Remote")
 
 # Try public clone first (faster and works for public repos)
@@ -67,9 +70,9 @@ if TEMP_CLONE.exists():
     import shutil
     shutil.rmtree(TEMP_CLONE)
 
-print(f"Cloning {REPO_OWNER}/{REPO_NAME}...")
+print(f"Cloning {REPO_OWNER}/{REPO_NAME} (branch: {REPO_BRANCH})...")
 result = subprocess.run(
-    ["git", "clone", "--depth=1", "--branch=main", REPO_URL, str(TEMP_CLONE)],
+    ["git", "clone", "--depth=1", "--branch", REPO_BRANCH, REPO_URL, str(TEMP_CLONE)],
     capture_output=True,
     text=True
 )
@@ -80,7 +83,7 @@ if result.returncode != 0:
     print(f"Error output:\n{error_msg}")
     raise RuntimeError(f"Failed to clone repository. Check that:\n"
                       f"1. Repository exists: https://github.com/{REPO_OWNER}/{REPO_NAME}\n"
-                      f"2. Branch 'main' exists\n"
+                      f"2. Branch '{REPO_BRANCH}' exists\n"
                       f"3. GH_PAT has correct permissions (repo scope)\n"
                       f"4. GH_PAT is not expired")
 
