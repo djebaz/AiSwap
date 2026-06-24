@@ -16,7 +16,8 @@ from typing import Any
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 import colab_batch
@@ -27,6 +28,14 @@ PHOTOS_DIR = DRIVE_ROOT / "photos"
 VIDEOS_DIR = DRIVE_ROOT / "videos"
 OUTPUT_PHOTOS_DIR = DRIVE_ROOT / "outputs" / "photos"
 OUTPUT_VIDEOS_DIR = DRIVE_ROOT / "outputs" / "videos"
+
+# Local upload directories (for Windows app uploads)
+LOCAL_ROOT = Path("/content/inputs")
+LOCAL_SOURCE_DIR = LOCAL_ROOT / "source"
+LOCAL_PHOTOS_DIR = LOCAL_ROOT / "photos"
+LOCAL_VIDEOS_DIR = LOCAL_ROOT / "videos"
+LOCAL_OUTPUT_PHOTOS_DIR = Path("/content/outputs/photos")
+LOCAL_OUTPUT_VIDEOS_DIR = Path("/content/outputs/videos")
 
 
 class JobRequest(BaseModel):
@@ -185,6 +194,72 @@ def health() -> dict[str, Any]:
         "paths": paths,
         "active_jobs": [job.snapshot() for job in JOBS.values() if job.status in {"queued", "running"}],
     }
+
+
+def ensure_local_layout() -> dict[str, str]:
+    """Create local upload directories."""
+    for path in (LOCAL_SOURCE_DIR, LOCAL_PHOTOS_DIR, LOCAL_VIDEOS_DIR, LOCAL_OUTPUT_PHOTOS_DIR, LOCAL_OUTPUT_VIDEOS_DIR):
+        path.mkdir(parents=True, exist_ok=True)
+    return {
+        "source_dir": str(LOCAL_SOURCE_DIR),
+        "photos_dir": str(LOCAL_PHOTOS_DIR),
+        "videos_dir": str(LOCAL_VIDEOS_DIR),
+        "output_photos_dir": str(LOCAL_OUTPUT_PHOTOS_DIR),
+        "output_videos_dir": str(LOCAL_OUTPUT_VIDEOS_DIR),
+    }
+
+
+@app.post("/upload/source")
+async def upload_source(file: UploadFile = File(...)) -> dict[str, Any]:
+    """Upload a source face image."""
+    ensure_local_layout()
+    filename = file.filename or "source.png"
+    dest = LOCAL_SOURCE_DIR / filename
+    content = await file.read()
+    dest.write_bytes(content)
+    return {"ok": True, "path": str(dest), "size": len(content)}
+
+
+@app.post("/upload/photos")
+async def upload_photos(files: list[UploadFile] = File(...)) -> dict[str, Any]:
+    """Upload photo files for batch processing."""
+    ensure_local_layout()
+    uploaded = []
+    for f in files:
+        filename = f.filename or f"photo_{len(uploaded)}.jpg"
+        dest = LOCAL_PHOTOS_DIR / filename
+        content = await f.read()
+        dest.write_bytes(content)
+        uploaded.append({"path": str(dest), "size": len(content)})
+    return {"ok": True, "count": len(uploaded), "files": uploaded, "input_dir": str(LOCAL_PHOTOS_DIR)}
+
+
+@app.post("/upload/videos")
+async def upload_videos(files: list[UploadFile] = File(...)) -> dict[str, Any]:
+    """Upload video files for batch processing."""
+    ensure_local_layout()
+    uploaded = []
+    for f in files:
+        filename = f.filename or f"video_{len(uploaded)}.mp4"
+        dest = LOCAL_VIDEOS_DIR / filename
+        content = await f.read()
+        dest.write_bytes(content)
+        uploaded.append({"path": str(dest), "size": len(content)})
+    return {"ok": True, "count": len(uploaded), "files": uploaded, "input_dir": str(LOCAL_VIDEOS_DIR)}
+
+
+@app.delete("/upload/clear")
+def clear_uploads() -> dict[str, Any]:
+    """Clear all uploaded files."""
+    import shutil
+    cleared = []
+    for d in (LOCAL_SOURCE_DIR, LOCAL_PHOTOS_DIR, LOCAL_VIDEOS_DIR, LOCAL_OUTPUT_PHOTOS_DIR, LOCAL_OUTPUT_VIDEOS_DIR):
+        if d.exists():
+            for f in d.iterdir():
+                if f.is_file():
+                    f.unlink()
+                    cleared.append(str(f))
+    return {"ok": True, "cleared": len(cleared)}
 
 
 @app.post("/jobs/photos")

@@ -6,6 +6,7 @@ import time
 import urllib.error
 import urllib.request
 import asyncio
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -17,12 +18,14 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
+    QProgressBar,
     QPushButton,
     QSpinBox,
     QTabWidget,
@@ -76,6 +79,24 @@ def save_settings(settings: AppSettings) -> None:
     APP_STATE.write_text(json.dumps(asdict(settings), indent=2) + "\n", encoding="utf-8")
 
 
+def is_local_path(path: str) -> bool:
+    """Check if a path is a local Windows path (not a remote Colab/Drive path)."""
+    if not path:
+        return False
+    # Windows absolute paths: C:\... or \\server\...
+    if len(path) >= 2 and path[1] == ':':
+        return True
+    if path.startswith('\\\\'):
+        return True
+    # Unix-style paths starting with /content or /drive are remote
+    if path.startswith('/content') or path.startswith('/drive'):
+        return False
+    # Relative paths on Windows
+    if Path(path).exists():
+        return True
+    return False
+
+
 class ApiClient:
     def __init__(self, settings: AppSettings):
         self.settings = settings
@@ -87,6 +108,56 @@ class ApiClient:
             data=data,
             method=method,
             headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def upload_file(self, endpoint: str, file_path: Path, field_name: str = "file", timeout: float = 120.0) -> dict[str, Any]:
+        """Upload a single file using multipart/form-data."""
+        boundary = f"----WebKitFormBoundary{uuid.uuid4().hex[:16]}"
+        content_type = f"multipart/form-data; boundary={boundary}"
+
+        filename = file_path.name
+        file_data = file_path.read_bytes()
+
+        body = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'
+            f"Content-Type: application/octet-stream\r\n\r\n"
+        ).encode("utf-8") + file_data + f"\r\n--{boundary}--\r\n".encode("utf-8")
+
+        request = urllib.request.Request(
+            self.settings.base_url + endpoint,
+            data=body,
+            method="POST",
+            headers={"Content-Type": content_type},
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def upload_files(self, endpoint: str, file_paths: list[Path], field_name: str = "files", timeout: float = 300.0) -> dict[str, Any]:
+        """Upload multiple files using multipart/form-data."""
+        boundary = f"----WebKitFormBoundary{uuid.uuid4().hex[:16]}"
+        content_type = f"multipart/form-data; boundary={boundary}"
+
+        body_parts = []
+        for file_path in file_paths:
+            filename = file_path.name
+            file_data = file_path.read_bytes()
+            part = (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'
+                f"Content-Type: application/octet-stream\r\n\r\n"
+            ).encode("utf-8") + file_data + b"\r\n"
+            body_parts.append(part)
+
+        body = b"".join(body_parts) + f"--{boundary}--\r\n".encode("utf-8")
+
+        request = urllib.request.Request(
+            self.settings.base_url + endpoint,
+            data=body,
+            method="POST",
+            headers={"Content-Type": content_type},
         )
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
@@ -230,6 +301,18 @@ class MainWindow(QMainWindow):
     def log(self, text: str) -> None:
         self.log_box.append(text)
 
+    def _browse_file(self, line_edit: QLineEdit, title: str, filter: str = "Images (*.png *.jpg *.jpeg *.bmp)") -> None:
+        """Open file dialog and set result to line edit."""
+        path, _ = QFileDialog.getOpenFileName(self, title, "", filter)
+        if path:
+            line_edit.setText(path)
+
+    def _browse_folder(self, line_edit: QLineEdit, title: str) -> None:
+        """Open folder dialog and set result to line edit."""
+        path = QFileDialog.getExistingDirectory(self, title)
+        if path:
+            line_edit.setText(path)
+
     def sync_settings(self) -> None:
         self.settings.host = self.host.text().strip()
         self.settings.port = int(self.port.value())
@@ -287,12 +370,17 @@ class MainWindow(QMainWindow):
         box = QGroupBox("Common options")
         form = QFormLayout(box)
         self.source_face = QLineEdit(self.settings.source_face)
+        source_row = QHBoxLayout()
+        source_row.addWidget(self.source_face)
+        source_browse = QPushButton("Browse...")
+        source_browse.clicked.connect(lambda: self._browse_file(self.source_face, "Select source face image"))
+        source_row.addWidget(source_browse)
         self.recursive = QCheckBox(); self.recursive.setChecked(self.settings.recursive)
         self.overwrite = QCheckBox(); self.overwrite.setChecked(self.settings.overwrite)
         self.skip_processed = QCheckBox(); self.skip_processed.setChecked(self.settings.skip_processed)
         self.many_faces = QCheckBox(); self.many_faces.setChecked(self.settings.many_faces)
         self.enhancer = QComboBox(); self.enhancer.addItems(["none", "gfpgan", "gpen256", "gpen512"]); self.enhancer.setCurrentText(self.settings.enhancer)
-        form.addRow("Source face path", self.source_face)
+        form.addRow("Source face path", source_row)
         form.addRow("Recursive", self.recursive)
         form.addRow("Overwrite", self.overwrite)
         form.addRow("Skip processed", self.skip_processed)
@@ -368,6 +456,7 @@ class MainWindow(QMainWindow):
 
     def check_connection(self) -> None:
         self.sync_settings()
+        self.tabs.setCurrentWidget(self.log_box)
         try:
             payload = self.client.request_json("GET", "/health")
             self.log("health: " + json.dumps(payload, indent=2))

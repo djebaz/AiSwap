@@ -111,6 +111,27 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+import shutil
+
+# Clean up Colab sample data and install GPU monitoring
+if Path("/content/sample_data").exists():
+    shutil.rmtree("/content/sample_data")
+    print("✓ Removed /content/sample_data")
+
+subprocess.run(["apt-get", "install", "-qq", "-y", "nvtop"], check=False)
+print("✓ Installed nvtop")
+
+# Create local input/output directories (for use without Drive)
+LOCAL_DIRS = [
+    Path("/content/inputs/source"),
+    Path("/content/inputs/photos"),
+    Path("/content/inputs/videos"),
+    Path("/content/outputs/photos"),
+    Path("/content/outputs/videos"),
+]
+for d in LOCAL_DIRS:
+    d.mkdir(parents=True, exist_ok=True)
+print("✓ Created local input/output directories in /content/")
 
 # Clone the repository with authentication support
 REPO_OWNER = "djebaz"
