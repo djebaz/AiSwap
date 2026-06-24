@@ -31,7 +31,13 @@ Self-contained, path-based photo/video batch face swap with an optional private 
 
 # %% [markdown] cell=1 id=mount-heading
 """MARKDOWN
-## 1. Mount Google Drive
+## 1. Mount Google Drive (OPTIONAL)
+
+⚠️ **Skip this cell if you're only using the Windows remote app** (it handles file transfers via API).
+
+**Run this cell if:**
+- You want to batch process videos/photos directly in Colab
+- You want persistent storage for outputs
 
 Mount your Google Drive to access source images, videos, and save processed outputs.
 """ENDMARKDOWN
@@ -59,11 +65,11 @@ else:
 # Verify Drive is accessible
 DRIVE_ROOT = Path("/content/drive/MyDrive/DeepLiveCamRemote")
 if not Path("/content/drive/MyDrive").exists():
-    raise RuntimeError(
-        "Google Drive not accessible!\n"
-        "Make sure Drive is mounted at /content/drive\n"
-        "Try running: from google.colab import drive; drive.mount('/content/drive', force_remount=True)"
-    )
+    print("⚠️  WARNING: Google Drive not accessible!")
+    print("If you're using the Windows app, you can skip this cell.")
+    print("If you need Drive, run: from google.colab import drive; drive.mount('/content/drive', force_remount=True)")
+    import sys
+    sys.exit(0)  # Exit gracefully instead of crashing
 
 # Create folder structure automatically
 folders = [
