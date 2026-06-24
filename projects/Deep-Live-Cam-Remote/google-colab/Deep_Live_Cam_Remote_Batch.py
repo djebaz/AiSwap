@@ -22,9 +22,21 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Clone the repository
-REPO_URL = "https://github.com/djebaz/AiSwap.git"
+# Clone the repository with authentication support
+REPO_OWNER = "djebaz"
+REPO_NAME = "AiSwap"
 WORK_DIR = Path("/content/Deep-Live-Cam-Remote")
+
+# Try to get GitHub PAT from Colab secrets for private repo access
+try:
+    from google.colab import userdata
+    GH_PAT = userdata.get('GH_PAT')
+    REPO_URL = f"https://{GH_PAT}@github.com/{REPO_OWNER}/{REPO_NAME}.git"
+    print("Using authenticated clone (private repo access)")
+except Exception:
+    # Fall back to public clone if no PAT is available
+    REPO_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}.git"
+    print("Using public clone (no authentication)")
 
 if WORK_DIR.exists():
     print(f"Removing existing directory: {WORK_DIR}")
@@ -37,7 +49,7 @@ if TEMP_CLONE.exists():
     import shutil
     shutil.rmtree(TEMP_CLONE)
 
-print(f"Cloning {REPO_URL}...")
+print(f"Cloning {REPO_OWNER}/{REPO_NAME}...")
 subprocess.run(["git", "clone", "--depth=1", "--branch=main", REPO_URL, str(TEMP_CLONE)], check=True)
 
 # Move the Deep-Live-Cam-Remote subdirectory
