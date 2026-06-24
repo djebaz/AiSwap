@@ -3,14 +3,16 @@ from __future__ import annotations
 import asyncio
 import json
 import mimetypes
+import tempfile
 import time
+import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QThread, Qt, Signal
+from PySide6.QtCore import QThread, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -23,6 +25,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QPushButton,
     QSpinBox,
@@ -31,6 +35,15 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+try:
+    from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+    from PySide6.QtMultimediaWidgets import QVideoWidget
+except Exception:
+    QAudioOutput = None
+    QMediaPlayer = None
+    QVideoWidget = None
+
 
 DEFAULT_DRIVE_ROOT = "/content/drive/MyDrive/DeepLiveCamRemote"
 APP_STATE = Path.home() / ".deep_live_cam_remote_windows_app.json"
@@ -103,20 +116,48 @@ def local_files(path: str, extensions: set[str], recursive: bool) -> list[Path]:
     return sorted(p for p in iterator if p.is_file() and p.suffix.lower() in extensions)
 
 
+def format_size(size: int | None) -> str:
+    if size is None:
+        return ""
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024.0 or unit == "GB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024.0
+    return f"{size} B"
+
+
 class ApiClient:
     def __init__(self, settings: AppSettings):
         self.settings = settings
 
+    def url(self, path: str) -> str:
+        return self.settings.base_url + urllib.parse.quote(path, safe="/:?=&%")
+
     def request_json(self, method: str, path: str, payload: dict[str, Any] | None = None, timeout: float = 10.0) -> dict[str, Any]:
         data = None if payload is None else json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(
-            self.settings.base_url + path,
+            self.url(path),
             data=data,
             method=method,
             headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
+
+    def download_bytes(self, path: str, timeout: float = 120.0) -> bytes:
+        with urllib.request.urlopen(self.url(path), timeout=timeout) as response:
+            return response.read()
+
+    def download_file(self, path: str, destination: Path, timeout: float = 600.0) -> Path:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with urllib.request.urlopen(self.url(path), timeout=timeout) as response, destination.open("wb") as handle:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                handle.write(chunk)
+        return destination
 
     def upload_file(self, endpoint: str, file_path: Path, field_name: str = "file", timeout: float = 120.0) -> dict[str, Any]:
         boundary = f"----DeepLiveCamBoundary{uuid.uuid4().hex}"
@@ -129,7 +170,7 @@ class ApiClient:
             f"Content-Type: {mime_type}\r\n\r\n"
         ).encode("utf-8") + file_data + f"\r\n--{boundary}--\r\n".encode("utf-8")
         request = urllib.request.Request(
-            self.settings.base_url + endpoint,
+            self.url(endpoint),
             data=body,
             method="POST",
             headers={"Content-Type": content_type},
@@ -153,7 +194,7 @@ class ApiClient:
             )
         body = b"".join(body_parts) + f"--{boundary}--\r\n".encode("utf-8")
         request = urllib.request.Request(
-            self.settings.base_url + endpoint,
+            self.url(endpoint),
             data=body,
             method="POST",
             headers={"Content-Type": content_type},
@@ -286,14 +327,20 @@ class MainWindow(QMainWindow):
         self.poller: PollWorker | None = None
         self.live_worker: LiveWorker | None = None
         self.active_job_id: str | None = None
+        self.output_files: list[dict[str, Any]] = []
+        self.output_temp_dir = Path(tempfile.gettempdir()) / "deep_live_cam_remote_outputs"
+        self.output_temp_dir.mkdir(parents=True, exist_ok=True)
+        self.output_timer = QTimer(self)
+        self.output_timer.timeout.connect(self.next_output)
         self.setWindowTitle("Deep-Live-Cam Remote Controller")
-        self.resize(980, 720)
+        self.resize(980, 760)
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
         self.log_box = QTextEdit(readOnly=True)
         self._build_setup_tab()
         self._build_photos_tab()
         self._build_videos_tab()
+        self._build_outputs_tab()
         self._build_live_tab()
         self.tabs.addTab(self.log_box, "Logs")
 
@@ -430,6 +477,63 @@ class MainWindow(QMainWindow):
         layout.addLayout(row); layout.addStretch(1)
         self.tabs.addTab(tab, "Videos")
 
+    def _build_outputs_tab(self) -> None:
+        tab = QWidget(); layout = QVBoxLayout(tab)
+        controls = QHBoxLayout()
+        self.outputs_kind = QComboBox(); self.outputs_kind.addItems(["photos", "videos"])
+        refresh = QPushButton("Refresh")
+        previous = QPushButton("Previous")
+        next_button = QPushButton("Next")
+        self.outputs_autoplay = QCheckBox("Auto-play")
+        download_current = QPushButton("Download current")
+        download_all = QPushButton("Download all")
+        refresh.clicked.connect(self.refresh_outputs)
+        previous.clicked.connect(self.previous_output)
+        next_button.clicked.connect(self.next_output)
+        self.outputs_autoplay.stateChanged.connect(self.toggle_outputs_autoplay)
+        self.outputs_kind.currentTextChanged.connect(lambda _text: self.refresh_outputs())
+        download_current.clicked.connect(self.download_current_output)
+        download_all.clicked.connect(self.download_all_outputs)
+        controls.addWidget(QLabel("Kind"))
+        controls.addWidget(self.outputs_kind)
+        controls.addWidget(refresh)
+        controls.addWidget(previous)
+        controls.addWidget(next_button)
+        controls.addWidget(self.outputs_autoplay)
+        controls.addWidget(download_current)
+        controls.addWidget(download_all)
+        controls.addStretch(1)
+        layout.addLayout(controls)
+
+        self.outputs_list = QListWidget()
+        self.outputs_list.currentRowChanged.connect(self.show_output_at)
+        layout.addWidget(self.outputs_list)
+
+        self.output_preview = QLabel("Refresh outputs to preview remote media")
+        self.output_preview.setAlignment(Qt.AlignCenter)
+        self.output_preview.setMinimumHeight(340)
+        self.output_preview.setWordWrap(True)
+        layout.addWidget(self.output_preview)
+
+        self.output_video = None
+        self.output_audio = None
+        self.output_player = None
+        if QMediaPlayer is not None and QVideoWidget is not None and QAudioOutput is not None:
+            self.output_video = QVideoWidget()
+            self.output_video.setMinimumHeight(340)
+            self.output_audio = QAudioOutput(self)
+            self.output_player = QMediaPlayer(self)
+            self.output_player.setAudioOutput(self.output_audio)
+            self.output_player.setVideoOutput(self.output_video)
+            layout.addWidget(self.output_video)
+            self.output_video.hide()
+
+        self.output_status = QLabel("")
+        self.output_status.setObjectName("statusLabel")
+        self.output_status.setWordWrap(True)
+        layout.addWidget(self.output_status)
+        self.tabs.addTab(tab, "Outputs")
+
     def _build_live_tab(self) -> None:
         tab = QWidget(); layout = QVBoxLayout(tab)
         form = QFormLayout()
@@ -465,6 +569,144 @@ class MainWindow(QMainWindow):
             self.log("health: " + json.dumps(payload, indent=2))
         except Exception as exc:
             self.log(f"health failed: {exc}")
+
+    def refresh_outputs(self) -> None:
+        self.sync_settings()
+        kind = self.outputs_kind.currentText()
+        self.outputs_list.clear()
+        self.output_files = []
+        self.output_status.setText("Refreshing outputs...")
+        self.stop_output_video()
+        try:
+            payload = self.client.request_json("GET", f"/outputs/{kind}", timeout=30.0)
+            self.output_files = list(payload.get("files") or [])
+            for item in self.output_files:
+                label = f"[{item.get('source')}] {item.get('relative_path')} ({format_size(item.get('size'))})"
+                self.outputs_list.addItem(QListWidgetItem(label))
+            self.output_status.setText(f"{len(self.output_files)} {kind} output file(s)")
+            if self.output_files:
+                self.outputs_list.setCurrentRow(0)
+            else:
+                self.output_preview.setText("No remote outputs found")
+        except Exception as exc:
+            self.output_status.setText(f"refresh failed: {exc}")
+            self.log(f"outputs refresh failed: {exc}")
+
+    def show_output_at(self, index: int) -> None:
+        if index < 0 or index >= len(self.output_files):
+            return
+        item = self.output_files[index]
+        kind = self.outputs_kind.currentText()
+        path = str(item.get("download_path") or "")
+        if not path:
+            self.output_status.setText("selected output has no download path")
+            return
+        try:
+            if kind == "photos":
+                self.stop_output_video()
+                if self.output_video is not None:
+                    self.output_video.hide()
+                self.output_preview.show()
+                data = self.client.download_bytes(path)
+                image = QImage.fromData(data)
+                if image.isNull():
+                    raise ValueError("downloaded image could not be decoded")
+                pixmap = QPixmap.fromImage(image).scaled(self.output_preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                self.output_preview.setPixmap(pixmap)
+                self.output_status.setText(f"Showing {item.get('relative_path')} from {item.get('source')}")
+            else:
+                self.show_video_output(item)
+        except Exception as exc:
+            self.output_status.setText(f"preview failed: {exc}")
+            self.log(f"output preview failed: {exc}")
+
+    def show_video_output(self, item: dict[str, Any]) -> None:
+        path = str(item.get("download_path") or "")
+        relative = str(item.get("relative_path") or item.get("name") or "output.mp4")
+        local_name = f"{item.get('source', 'output')}_{relative.replace('/', '_').replace('\\', '_')}"
+        local_path = self.output_temp_dir / local_name
+        self.output_status.setText(f"Loading video preview: {relative}")
+        if not local_path.exists() or local_path.stat().st_size != int(item.get("size") or -1):
+            self.client.download_file(path, local_path, timeout=900.0)
+        if self.output_player is None or self.output_video is None:
+            self.output_preview.show()
+            self.output_preview.setText(f"Video ready to download:\n{relative}\n\nInstall PySide6 multimedia support for inline playback.")
+            self.output_status.setText(f"Selected video {relative}")
+            return
+        self.output_preview.hide()
+        self.output_video.show()
+        self.output_player.setSource(QUrl.fromLocalFile(str(local_path)))
+        self.output_player.play()
+        self.output_status.setText(f"Playing {relative}")
+
+    def stop_output_video(self) -> None:
+        if self.output_player is not None:
+            self.output_player.stop()
+        if self.output_video is not None:
+            self.output_video.hide()
+        if hasattr(self, "output_preview"):
+            self.output_preview.show()
+
+    def current_output(self) -> dict[str, Any] | None:
+        index = self.outputs_list.currentRow()
+        if index < 0 or index >= len(self.output_files):
+            return None
+        return self.output_files[index]
+
+    def previous_output(self) -> None:
+        if not self.output_files:
+            return
+        index = self.outputs_list.currentRow()
+        self.outputs_list.setCurrentRow((index - 1) % len(self.output_files))
+
+    def next_output(self) -> None:
+        if not self.output_files:
+            return
+        index = self.outputs_list.currentRow()
+        self.outputs_list.setCurrentRow((index + 1) % len(self.output_files))
+
+    def toggle_outputs_autoplay(self) -> None:
+        if self.outputs_autoplay.isChecked():
+            interval = 8000 if self.outputs_kind.currentText() == "videos" else 3500
+            self.output_timer.start(interval)
+        else:
+            self.output_timer.stop()
+
+    def download_current_output(self) -> None:
+        item = self.current_output()
+        if not item:
+            self.output_status.setText("No output selected")
+            return
+        folder = QFileDialog.getExistingDirectory(self, "Download selected output to folder")
+        if not folder:
+            return
+        try:
+            destination = Path(folder) / str(item.get("name") or Path(str(item.get("relative_path"))).name)
+            self.client.download_file(str(item.get("download_path")), destination)
+            self.output_status.setText(f"Downloaded to {destination}")
+            self.log(f"downloaded output: {destination}")
+        except Exception as exc:
+            self.output_status.setText(f"download failed: {exc}")
+            self.log(f"download failed: {exc}")
+
+    def download_all_outputs(self) -> None:
+        if not self.output_files:
+            self.output_status.setText("No outputs to download")
+            return
+        folder = QFileDialog.getExistingDirectory(self, "Download all listed outputs to folder")
+        if not folder:
+            return
+        destination_root = Path(folder)
+        try:
+            for item in self.output_files:
+                relative = Path(str(item.get("relative_path") or item.get("name")))
+                destination = destination_root / str(item.get("source") or "output") / relative
+                self.client.download_file(str(item.get("download_path")), destination)
+            self.output_status.setText(f"Downloaded {len(self.output_files)} file(s) to {destination_root}")
+            self.log(f"downloaded {len(self.output_files)} output file(s) to {destination_root}")
+        except Exception as exc:
+            self.output_status.setText(f"download all failed: {exc}")
+            self.log(f"download all failed: {exc}")
 
     def upload_source_if_needed(self) -> str:
         source_face = self.settings.source_face
