@@ -347,6 +347,7 @@ Run these cells to set up secure private networking.
 # @title Install Tailscale
 import subprocess
 import sys
+import time
 
 print("Installing Tailscale...")
 result = subprocess.run(
@@ -363,19 +364,24 @@ if result.returncode == 0:
     if install_result.returncode == 0:
         print("✓ Tailscale installed successfully")
 
-        # Start the tailscaled daemon
+        # Start tailscaled daemon in background (Colab needs userspace networking)
         print("Starting Tailscale daemon...")
-        daemon_result = subprocess.run(
-            ["sudo", "systemctl", "start", "tailscaled"],
+        daemon_cmd = "sudo tailscaled --tun=userspace-networking --socks5-server=localhost:1055 > /dev/null 2>&1 &"
+        subprocess.Popen(daemon_cmd, shell=True)
+
+        # Wait for daemon to start
+        time.sleep(2)
+
+        # Check if daemon is running
+        check_result = subprocess.run(
+            ["tailscale", "status"],
             capture_output=True,
             text=True
         )
-        if daemon_result.returncode == 0:
+        if "Logged out" in check_result.stderr or check_result.returncode == 0:
             print("✓ Tailscale daemon started")
         else:
-            print(f"⚠️  Daemon start warning: {daemon_result.stderr}")
-            print("Trying alternative start method...")
-            subprocess.run(["sudo", "tailscaled", "--tun=userspace-networking", "--socks5-server=localhost:1055", "--outbound-http-proxy-listen=localhost:1055", "&"], shell=True)
+            print(f"⚠️  Daemon status: {check_result.stderr}")
     else:
         print(f"Installation error: {install_result.stderr}")
         sys.exit(1)
