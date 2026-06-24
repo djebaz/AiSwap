@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Any, Callable
 
 from PySide6.QtCore import QThread, Qt, QUrl, Signal
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import QImage, QImageReader, QPixmap
 from PySide6.QtWidgets import QFileDialog, QListWidgetItem
 
 from windows_app import app as base
@@ -65,6 +66,22 @@ def _copy_settings(settings: base.AppSettings) -> base.AppSettings:
     return base.AppSettings(**base.asdict(settings))
 
 
+def _source_upload_path(path: Path) -> tuple[Path, str | None]:
+    if path.suffix.lower() not in base.PHOTO_EXTENSIONS:
+        return path, None
+    reader = QImageReader(str(path))
+    reader.setAutoTransform(True)
+    image = reader.read()
+    if image.isNull():
+        return path, None
+    output_dir = Path(tempfile.gettempdir()) / "deep_live_cam_remote_sources"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output = output_dir / f"{path.stem}_{uuid.uuid4().hex[:8]}.png"
+    if image.save(str(output), "PNG"):
+        return output, f"normalized source image orientation for upload: {output}"
+    return path, None
+
+
 def _prepare_and_start_batch(settings: base.AppSettings, kind: str) -> dict[str, Any]:
     client = base.ApiClient(settings)
     logs: list[str] = ["checking Colab API before starting batch"]
@@ -75,8 +92,11 @@ def _prepare_and_start_batch(settings: base.AppSettings, kind: str) -> dict[str,
         source_path = Path(source_face)
         if not source_path.is_file():
             raise FileNotFoundError(f"Local source face does not exist: {source_face}")
+        upload_path, normalization_log = _source_upload_path(source_path)
+        if normalization_log:
+            logs.append(normalization_log)
         logs.append(f"uploading local source face: {source_path}")
-        response = client.upload_file("/upload/file?kind=source", source_path, timeout=30.0)
+        response = client.upload_file("/upload/file?kind=source", upload_path, timeout=30.0)
         source_face = str(response.get("path") or source_face)
         logs.append(f"source uploaded to: {source_face}")
 
