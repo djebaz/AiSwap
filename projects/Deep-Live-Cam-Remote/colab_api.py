@@ -10,6 +10,7 @@ import queue
 import threading
 import time
 import uuid
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ import numpy as np
 from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 
 import colab_batch
 
@@ -35,6 +37,7 @@ LOCAL_PHOTOS_DIR = LOCAL_ROOT / "photos"
 LOCAL_VIDEOS_DIR = LOCAL_ROOT / "videos"
 LOCAL_OUTPUT_PHOTOS_DIR = Path("/content/outputs/photos")
 LOCAL_OUTPUT_VIDEOS_DIR = Path("/content/outputs/videos")
+ZIP_OUTPUT_DIR = Path("/content/outputs/downloads")
 
 OUTPUT_IMAGE_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".webp"}
 OUTPUT_VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm"}
@@ -181,6 +184,32 @@ def output_root(kind: str, source: str) -> tuple[Path, set[str]]:
     raise HTTPException(status_code=404, detail=f"unknown output source: {source}")
 
 
+def output_file_entries(kind: str) -> list[dict[str, Any]]:
+    ensure_drive_layout()
+    ensure_local_layout()
+    roots, extensions = output_roots(kind)
+    files: list[dict[str, Any]] = []
+    for source, root in roots:
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if not path.is_file() or path.suffix.lower() not in extensions:
+                continue
+            stat = path.stat()
+            relative_path = path.relative_to(root).as_posix()
+            files.append({
+                "name": path.name,
+                "relative_path": relative_path,
+                "source": source,
+                "path": path,
+                "size": stat.st_size,
+                "modified": stat.st_mtime,
+                "download_path": f"/outputs/{kind}/file/{source}/{relative_path}",
+            })
+    files.sort(key=lambda item: (item["modified"], item["name"]), reverse=True)
+    return files
+
+
 def safe_output_path(kind: str, source: str, relative_path: str) -> Path:
     root, extensions = output_root(kind, source)
     candidate = (root / relative_path).resolve()
@@ -192,6 +221,10 @@ def safe_output_path(kind: str, source: str, relative_path: str) -> Path:
     if not candidate.is_file():
         raise HTTPException(status_code=404, detail="output file not found")
     return candidate
+
+
+def remove_file(path: str) -> None:
+    Path(path).unlink(missing_ok=True)
 
 
 async def write_upload(file: UploadFile, dest: Path) -> int:
@@ -266,28 +299,27 @@ def health() -> dict[str, Any]:
 
 @app.get("/outputs/{kind}")
 def list_outputs(kind: str) -> dict[str, Any]:
-    ensure_drive_layout()
-    ensure_local_layout()
-    roots, extensions = output_roots(kind)
-    files: list[dict[str, Any]] = []
-    for source, root in roots:
-        if not root.exists():
-            continue
-        for path in root.rglob("*"):
-            if not path.is_file() or path.suffix.lower() not in extensions:
-                continue
-            stat = path.stat()
-            relative_path = path.relative_to(root).as_posix()
-            files.append({
-                "name": path.name,
-                "relative_path": relative_path,
-                "source": source,
-                "size": stat.st_size,
-                "modified": stat.st_mtime,
-                "download_path": f"/outputs/{kind}/file/{source}/{relative_path}",
-            })
-    files.sort(key=lambda item: (item["modified"], item["name"]), reverse=True)
-    return {"ok": True, "kind": kind, "count": len(files), "files": files}
+    files = output_file_entries(kind)
+    public_files = [{key: value for key, value in item.items() if key != "path"} for item in files]
+    return {"ok": True, "kind": kind, "count": len(public_files), "files": public_files}
+
+
+@app.get("/outputs/{kind}/zip")
+def get_output_zip(kind: str) -> FileResponse:
+    files = output_file_entries(kind)
+    if not files:
+        raise HTTPException(status_code=404, detail=f"no {kind} outputs found")
+    ZIP_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    zip_path = ZIP_OUTPUT_DIR / f"{kind}_outputs_{uuid.uuid4().hex}.zip"
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
+        for item in files:
+            archive.write(item["path"], f"{item['source']}/{item['relative_path']}")
+    return FileResponse(
+        zip_path,
+        media_type="application/zip",
+        filename=f"{kind}_outputs.zip",
+        background=BackgroundTask(remove_file, str(zip_path)),
+    )
 
 
 @app.get("/outputs/{kind}/file/{source}/{relative_path:path}")
