@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import json
 import mimetypes
+import sys
 import tempfile
 import time
 import urllib.parse
@@ -323,9 +325,25 @@ class PollWorker(QThread):
             time.sleep(1.0)
 
 
+def set_dark_title_bar(window: QMainWindow) -> None:
+    """Enable dark title bar on Windows 10/11."""
+    if sys.platform != "win32":
+        return
+    try:
+        hwnd = int(window.winId())
+        DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+        value = ctypes.c_int(1)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ctypes.byref(value), ctypes.sizeof(value)
+        )
+    except Exception:
+        pass  # Silently fail on older Windows versions
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        set_dark_title_bar(self)
         self.settings = load_settings()
         self.client = ApiClient(self.settings)
         self.poller: PollWorker | None = None
