@@ -154,6 +154,17 @@ def repo_ready() -> bool:
 
 if repo_ready():
     print(f"✓ Repository already present: {WORK_DIR}")
+    # Pull latest changes
+    os.chdir(WORK_DIR)
+    result = subprocess.run(["git", "pull", "--ff-only"], capture_output=True, text=True)
+    if result.returncode == 0:
+        if "Already up to date" in result.stdout:
+            print("✓ Already up to date")
+        else:
+            print("✓ Pulled latest changes")
+            print(result.stdout.strip())
+    else:
+        print(f"⚠️ git pull failed: {result.stderr.strip()}")
 else:
     # Need to clone
     import urllib.request
