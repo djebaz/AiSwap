@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import base64
 import contextlib
 import io
 import json
@@ -16,8 +15,7 @@ from typing import Any
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 import colab_batch
@@ -29,7 +27,6 @@ VIDEOS_DIR = DRIVE_ROOT / "videos"
 OUTPUT_PHOTOS_DIR = DRIVE_ROOT / "outputs" / "photos"
 OUTPUT_VIDEOS_DIR = DRIVE_ROOT / "outputs" / "videos"
 
-# Local upload directories (for Windows app uploads)
 LOCAL_ROOT = Path("/content/inputs")
 LOCAL_SOURCE_DIR = LOCAL_ROOT / "source"
 LOCAL_PHOTOS_DIR = LOCAL_ROOT / "photos"
@@ -133,6 +130,41 @@ def ensure_drive_layout() -> dict[str, str]:
     }
 
 
+def ensure_local_layout() -> dict[str, str]:
+    for path in (LOCAL_SOURCE_DIR, LOCAL_PHOTOS_DIR, LOCAL_VIDEOS_DIR, LOCAL_OUTPUT_PHOTOS_DIR, LOCAL_OUTPUT_VIDEOS_DIR):
+        path.mkdir(parents=True, exist_ok=True)
+    return {
+        "source_dir": str(LOCAL_SOURCE_DIR),
+        "photos_dir": str(LOCAL_PHOTOS_DIR),
+        "videos_dir": str(LOCAL_VIDEOS_DIR),
+        "output_photos_dir": str(LOCAL_OUTPUT_PHOTOS_DIR),
+        "output_videos_dir": str(LOCAL_OUTPUT_VIDEOS_DIR),
+    }
+
+
+def safe_upload_name(filename: str | None, fallback: str) -> str:
+    name = Path(filename or fallback).name
+    return name or fallback
+
+
+def upload_destination(kind: str, filename: str | None) -> tuple[Path, dict[str, str]]:
+    paths = ensure_local_layout()
+    normalized_kind = kind.lower()
+    if normalized_kind == "source":
+        return LOCAL_SOURCE_DIR / safe_upload_name(filename, "source.png"), paths
+    if normalized_kind in {"photo", "photos"}:
+        return LOCAL_PHOTOS_DIR / safe_upload_name(filename, "photo.jpg"), paths
+    if normalized_kind in {"video", "videos"}:
+        return LOCAL_VIDEOS_DIR / safe_upload_name(filename, "video.mp4"), paths
+    raise ValueError(f"unknown upload kind: {kind}")
+
+
+async def write_upload(file: UploadFile, dest: Path) -> int:
+    content = await file.read()
+    dest.write_bytes(content)
+    return len(content)
+
+
 def bool_arg(name: str, value: bool) -> list[str]:
     return [f"--{name}" if value else f"--no-{name}"]
 
@@ -192,73 +224,61 @@ def health() -> dict[str, Any]:
     return {
         "ok": True,
         "paths": paths,
+        "local_paths": ensure_local_layout(),
         "active_jobs": [job.snapshot() for job in JOBS.values() if job.status in {"queued", "running"}],
     }
 
 
-def ensure_local_layout() -> dict[str, str]:
-    """Create local upload directories."""
-    for path in (LOCAL_SOURCE_DIR, LOCAL_PHOTOS_DIR, LOCAL_VIDEOS_DIR, LOCAL_OUTPUT_PHOTOS_DIR, LOCAL_OUTPUT_VIDEOS_DIR):
-        path.mkdir(parents=True, exist_ok=True)
-    return {
-        "source_dir": str(LOCAL_SOURCE_DIR),
-        "photos_dir": str(LOCAL_PHOTOS_DIR),
-        "videos_dir": str(LOCAL_VIDEOS_DIR),
-        "output_photos_dir": str(LOCAL_OUTPUT_PHOTOS_DIR),
-        "output_videos_dir": str(LOCAL_OUTPUT_VIDEOS_DIR),
-    }
+@app.post("/upload/file")
+async def upload_file(kind: str = "photos", file: UploadFile = File(...)) -> dict[str, Any]:
+    dest, paths = upload_destination(kind, file.filename)
+    size = await write_upload(file, dest)
+    response = {"ok": True, "kind": kind, "path": str(dest), "size": size}
+    if kind.lower() in {"photo", "photos"}:
+        response.update({"input_dir": paths["photos_dir"], "output_dir": paths["output_photos_dir"]})
+    elif kind.lower() in {"video", "videos"}:
+        response.update({"input_dir": paths["videos_dir"], "output_dir": paths["output_videos_dir"]})
+    return response
 
 
 @app.post("/upload/source")
 async def upload_source(file: UploadFile = File(...)) -> dict[str, Any]:
-    """Upload a source face image."""
-    ensure_local_layout()
-    filename = file.filename or "source.png"
-    dest = LOCAL_SOURCE_DIR / filename
-    content = await file.read()
-    dest.write_bytes(content)
-    return {"ok": True, "path": str(dest), "size": len(content)}
+    dest, _ = upload_destination("source", file.filename)
+    size = await write_upload(file, dest)
+    return {"ok": True, "path": str(dest), "size": size}
 
 
 @app.post("/upload/photos")
 async def upload_photos(files: list[UploadFile] = File(...)) -> dict[str, Any]:
-    """Upload photo files for batch processing."""
-    ensure_local_layout()
+    paths = ensure_local_layout()
     uploaded = []
-    for f in files:
-        filename = f.filename or f"photo_{len(uploaded)}.jpg"
-        dest = LOCAL_PHOTOS_DIR / filename
-        content = await f.read()
-        dest.write_bytes(content)
-        uploaded.append({"path": str(dest), "size": len(content)})
-    return {"ok": True, "count": len(uploaded), "files": uploaded, "input_dir": str(LOCAL_PHOTOS_DIR)}
+    for file in files:
+        dest = LOCAL_PHOTOS_DIR / safe_upload_name(file.filename, f"photo_{len(uploaded)}.jpg")
+        size = await write_upload(file, dest)
+        uploaded.append({"path": str(dest), "size": size})
+    return {"ok": True, "count": len(uploaded), "files": uploaded, "input_dir": paths["photos_dir"], "output_dir": paths["output_photos_dir"]}
 
 
 @app.post("/upload/videos")
 async def upload_videos(files: list[UploadFile] = File(...)) -> dict[str, Any]:
-    """Upload video files for batch processing."""
-    ensure_local_layout()
+    paths = ensure_local_layout()
     uploaded = []
-    for f in files:
-        filename = f.filename or f"video_{len(uploaded)}.mp4"
-        dest = LOCAL_VIDEOS_DIR / filename
-        content = await f.read()
-        dest.write_bytes(content)
-        uploaded.append({"path": str(dest), "size": len(content)})
-    return {"ok": True, "count": len(uploaded), "files": uploaded, "input_dir": str(LOCAL_VIDEOS_DIR)}
+    for file in files:
+        dest = LOCAL_VIDEOS_DIR / safe_upload_name(file.filename, f"video_{len(uploaded)}.mp4")
+        size = await write_upload(file, dest)
+        uploaded.append({"path": str(dest), "size": size})
+    return {"ok": True, "count": len(uploaded), "files": uploaded, "input_dir": paths["videos_dir"], "output_dir": paths["output_videos_dir"]}
 
 
 @app.delete("/upload/clear")
 def clear_uploads() -> dict[str, Any]:
-    """Clear all uploaded files."""
-    import shutil
     cleared = []
-    for d in (LOCAL_SOURCE_DIR, LOCAL_PHOTOS_DIR, LOCAL_VIDEOS_DIR, LOCAL_OUTPUT_PHOTOS_DIR, LOCAL_OUTPUT_VIDEOS_DIR):
-        if d.exists():
-            for f in d.iterdir():
-                if f.is_file():
-                    f.unlink()
-                    cleared.append(str(f))
+    for directory in (LOCAL_SOURCE_DIR, LOCAL_PHOTOS_DIR, LOCAL_VIDEOS_DIR, LOCAL_OUTPUT_PHOTOS_DIR, LOCAL_OUTPUT_VIDEOS_DIR):
+        if directory.exists():
+            for path in directory.iterdir():
+                if path.is_file():
+                    path.unlink()
+                    cleared.append(str(path))
     return {"ok": True, "cleared": len(cleared)}
 
 
