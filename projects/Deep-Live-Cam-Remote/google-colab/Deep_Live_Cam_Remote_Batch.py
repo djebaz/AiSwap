@@ -106,22 +106,32 @@ print("\nThen run the next cell to install dependencies.")
 
 # %% [code] cell=4 id=setup
 """CELL: Clone and install"""
-# @title Clone and install
+# @title Clone and install (resumable - safe to re-run after session restart)
 import os
 import subprocess
 import sys
 from pathlib import Path
 import shutil
 
-# Clean up Colab sample data and install GPU monitoring
+REPO_OWNER = "djebaz"
+REPO_NAME = "AiSwap"
+REPO_BRANCH = "feature/windows-remote-app"  # Use "main" after PR is merged
+WORK_DIR = Path("/content/Deep-Live-Cam-Remote")
+CRITICAL_FILES = ["colab_api.py", "colab_batch.py", "modules/__init__.py"]
+
+# Clean up Colab sample data (one-time)
 if Path("/content/sample_data").exists():
     shutil.rmtree("/content/sample_data")
     print("✓ Removed /content/sample_data")
 
-subprocess.run(["apt-get", "install", "-qq", "-y", "nvtop"], check=False)
-print("✓ Installed nvtop")
+# Install nvtop if not present
+if shutil.which("nvtop") is None:
+    subprocess.run(["apt-get", "install", "-qq", "-y", "nvtop"], check=False)
+    print("✓ Installed nvtop")
+else:
+    print("✓ nvtop already installed")
 
-# Create local input/output directories (for use without Drive)
+# Create local input/output directories
 LOCAL_DIRS = [
     Path("/content/inputs/source"),
     Path("/content/inputs/photos"),
@@ -131,123 +141,126 @@ LOCAL_DIRS = [
 ]
 for d in LOCAL_DIRS:
     d.mkdir(parents=True, exist_ok=True)
-print("✓ Created local input/output directories in /content/")
+print("✓ Local input/output directories ready")
 
-# Clone the repository with authentication support
-REPO_OWNER = "djebaz"
-REPO_NAME = "AiSwap"
-REPO_BRANCH = "feature/windows-remote-app"  # Use "main" after PR is merged
-WORK_DIR = Path("/content/Deep-Live-Cam-Remote")
+# Check if repo is already cloned with all critical files
+def repo_ready() -> bool:
+    if not WORK_DIR.exists():
+        return False
+    for f in CRITICAL_FILES:
+        if not (WORK_DIR / f).exists():
+            return False
+    return True
 
-# Try public clone first (faster and works for public repos)
-import urllib.request
-import json
-try:
-    # Check if repo is public using GitHub API
-    api_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}"
-    req = urllib.request.Request(api_url)
-    with urllib.request.urlopen(req, timeout=5) as response:
-        repo_info = json.loads(response.read().decode())
-        is_private = repo_info.get("private", True)
-except Exception:
-    # If we can't check, assume it might be private
-    is_private = True
-
-# Use PAT if repo is private, otherwise use public URL
-if is_private:
-    try:
-        from google.colab import userdata
-        GH_PAT = userdata.get('GH_PAT')
-        REPO_URL = f"https://{GH_PAT}@github.com/{REPO_OWNER}/{REPO_NAME}.git"
-        print("Using authenticated clone (private repo)")
-    except Exception as e:
-        print(f"Warning: Repository appears private but no GH_PAT available: {e}")
-        print("Attempting public clone anyway...")
-        REPO_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}.git"
+if repo_ready():
+    print(f"✓ Repository already present: {WORK_DIR}")
 else:
-    REPO_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}.git"
-    print("Using public clone (repo is public)")
+    # Need to clone
+    import urllib.request
+    import json
 
-# Ensure we're in a valid directory before git operations
-os.chdir("/content")
+    # Check if repo is public
+    try:
+        api_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}"
+        req = urllib.request.Request(api_url)
+        with urllib.request.urlopen(req, timeout=5) as response:
+            repo_info = json.loads(response.read().decode())
+            is_private = repo_info.get("private", True)
+    except Exception:
+        is_private = True
 
-# Clean up any existing directories
-if WORK_DIR.exists():
-    print(f"Removing existing directory: {WORK_DIR}")
-    import shutil
-    shutil.rmtree(WORK_DIR)
+    # Build clone URL
+    if is_private:
+        try:
+            from google.colab import userdata
+            GH_PAT = userdata.get('GH_PAT')
+            REPO_URL = f"https://{GH_PAT}@github.com/{REPO_OWNER}/{REPO_NAME}.git"
+            print("Using authenticated clone (private repo)")
+        except Exception as e:
+            print(f"Warning: Repository appears private but no GH_PAT available: {e}")
+            REPO_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}.git"
+    else:
+        REPO_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}.git"
+        print("Using public clone (repo is public)")
 
-# Clone into temp location then move the subdirectory
-TEMP_CLONE = Path("/content/AiSwap_temp")
-if TEMP_CLONE.exists():
-    import shutil
+    os.chdir("/content")
+
+    # Clean up any existing incomplete directories
+    if WORK_DIR.exists():
+        shutil.rmtree(WORK_DIR)
+    TEMP_CLONE = Path("/content/AiSwap_temp")
+    if TEMP_CLONE.exists():
+        shutil.rmtree(TEMP_CLONE)
+
+    print(f"Cloning {REPO_OWNER}/{REPO_NAME} (branch: {REPO_BRANCH})...")
+    result = subprocess.run(
+        ["git", "clone", "--depth=1", "--branch", REPO_BRANCH, REPO_URL, str(TEMP_CLONE)],
+        capture_output=True, text=True, cwd="/content"
+    )
+    if result.returncode != 0:
+        error_msg = result.stderr.replace(REPO_URL, f"https://github.com/{REPO_OWNER}/{REPO_NAME}.git")
+        raise RuntimeError(f"Clone failed:\n{error_msg}")
+
+    # Move subdirectory and clean up
+    source_dir = TEMP_CLONE / "projects" / "Deep-Live-Cam-Remote"
+    shutil.move(str(source_dir), str(WORK_DIR))
     shutil.rmtree(TEMP_CLONE)
+    print(f"✓ Repository cloned to: {WORK_DIR}")
 
-print(f"Cloning {REPO_OWNER}/{REPO_NAME} (branch: {REPO_BRANCH})...")
-result = subprocess.run(
-    ["git", "clone", "--depth=1", "--branch", REPO_BRANCH, REPO_URL, str(TEMP_CLONE)],
-    capture_output=True,
-    text=True,
-    cwd="/content"  # Ensure git runs from valid directory
-)
-if result.returncode != 0:
-    # Don't expose PAT in error message
-    error_msg = result.stderr.replace(REPO_URL, f"https://github.com/{REPO_OWNER}/{REPO_NAME}.git")
-    print(f"Clone failed with exit code {result.returncode}")
-    print(f"Error output:\n{error_msg}")
-    raise RuntimeError(f"Failed to clone repository. Check that:\n"
-                      f"1. Repository exists: https://github.com/{REPO_OWNER}/{REPO_NAME}\n"
-                      f"2. Branch '{REPO_BRANCH}' exists\n"
-                      f"3. GH_PAT has correct permissions (repo scope)\n"
-                      f"4. GH_PAT is not expired")
+# Check if key packages are already installed
+def packages_ready() -> bool:
+    try:
+        import insightface
+        import onnxruntime
+        import fastapi
+        import uvicorn
+        return True
+    except ImportError:
+        return False
 
-# Move the Deep-Live-Cam-Remote subdirectory
-import shutil
-source_dir = TEMP_CLONE / "projects" / "Deep-Live-Cam-Remote"
-shutil.move(str(source_dir), str(WORK_DIR))
-shutil.rmtree(TEMP_CLONE)
+if packages_ready():
+    print("✓ Python packages already installed")
+else:
+    print("Installing Python dependencies...")
+    subprocess.run([
+        sys.executable, "-m", "pip", "install", "-q",
+        "numpy<2",
+        "opencv-python==4.10.0.84",
+        "insightface==0.7.3",
+        "onnx==1.18.0",
+        "onnxruntime-gpu==1.23.2",
+        "scikit-learn",
+        "tqdm",
+        "pillow",
+        "psutil",
+        "protobuf==4.25.1",
+        "PySide6>=6.7,<7",
+        "cv2_enumerate_cameras==1.1.15",
+        "fastapi>=0.115,<1",
+        "uvicorn[standard]>=0.30,<1",
+        "websockets>=12,<16"
+    ], check=True)
+    print("✓ Python packages installed")
 
-print(f"Repository cloned to: {WORK_DIR}")
-
-# Install dependencies
-print("Installing Python dependencies...")
-subprocess.run([
-    sys.executable, "-m", "pip", "install", "-q",
-    "numpy<2",
-    "opencv-python==4.10.0.84",
-    "insightface==0.7.3",
-    "onnx==1.18.0",
-    "onnxruntime-gpu==1.23.2",
-    "scikit-learn",
-    "tqdm",
-    "pillow",
-    "psutil",
-    "protobuf==4.25.1",
-    "PySide6>=6.7,<7",
-    "cv2_enumerate_cameras==1.1.15",
-    "fastapi>=0.115,<1",
-    "uvicorn[standard]>=0.30,<1",
-    "websockets>=12,<16"
-], check=True)
-
-# Download the face swapper model
+# Download model if needed
 import urllib.request
 MODEL_URL = "https://huggingface.co/hacksider/deep-live-cam/resolve/main/inswapper_128.onnx"
 MODEL_PATH = WORK_DIR / "models" / "inswapper_128.onnx"
 MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-if not MODEL_PATH.exists() or MODEL_PATH.stat().st_size < 1024 * 1024:
+if MODEL_PATH.exists() and MODEL_PATH.stat().st_size > 1024 * 1024:
+    print(f"✓ Model already present: {MODEL_PATH.name} ({MODEL_PATH.stat().st_size / 1048576:.1f} MB)")
+else:
     MODEL_PATH.unlink(missing_ok=True)
     temporary_model = MODEL_PATH.with_suffix(".onnx.part")
     temporary_model.unlink(missing_ok=True)
-    print("Downloading face swapper model to", MODEL_PATH)
+    print("Downloading face swapper model...")
     urllib.request.urlretrieve(MODEL_URL, temporary_model)
     if temporary_model.stat().st_size < 1024 * 1024:
         temporary_model.unlink(missing_ok=True)
         raise RuntimeError("Downloaded inswapper_128.onnx is incomplete")
     temporary_model.replace(MODEL_PATH)
-
-print(f"Face swapper model ready: {MODEL_PATH} ({MODEL_PATH.stat().st_size / 1048576:.1f} MB)")
+    print(f"✓ Model downloaded: {MODEL_PATH.name} ({MODEL_PATH.stat().st_size / 1048576:.1f} MB)")
 
 # Clean up any cached modules from previous runs
 for module_name in list(sys.modules):
@@ -365,105 +378,112 @@ Run these cells to set up secure private networking.
 
 # %% [code] cell=15 id=tailscale-install
 """CELL: Install Tailscale"""
-# @title Install Tailscale
+# @title Install Tailscale (resumable - safe to re-run)
 import subprocess
-import sys
+import shutil
 import time
 
-print("Installing Tailscale...")
-result = subprocess.run(
-    ["curl", "-fsSL", "https://tailscale.com/install.sh"],
-    capture_output=True,
-    text=True
-)
-if result.returncode == 0:
-    install_result = subprocess.run(
-        ["sh", "-c", result.stdout],
-        capture_output=True,
-        text=True
-    )
-    if install_result.returncode == 0:
-        print("✓ Tailscale installed successfully")
+def tailscale_installed() -> bool:
+    return shutil.which("tailscale") is not None
 
-        # Start tailscaled daemon in background (Colab needs userspace networking)
-        print("Starting Tailscale daemon...")
-        daemon_cmd = "sudo tailscaled --tun=userspace-networking --socks5-server=localhost:1055 > /dev/null 2>&1 &"
-        subprocess.Popen(daemon_cmd, shell=True)
+def daemon_running() -> bool:
+    result = subprocess.run(["tailscale", "status"], capture_output=True, text=True)
+    # Daemon is running if we get any response (even "Logged out")
+    return result.returncode == 0 or "Logged out" in result.stderr or "Logged out" in result.stdout
 
-        # Wait for daemon to start
-        time.sleep(2)
-
-        # Check if daemon is running
-        check_result = subprocess.run(
-            ["tailscale", "status"],
-            capture_output=True,
-            text=True
-        )
-        if "Logged out" in check_result.stderr or check_result.returncode == 0:
-            print("✓ Tailscale daemon started")
-        else:
-            print(f"⚠️  Daemon status: {check_result.stderr}")
-    else:
-        print(f"Installation error: {install_result.stderr}")
-        sys.exit(1)
+# Install if needed
+if tailscale_installed():
+    print("✓ Tailscale already installed")
 else:
-    print(f"Download error: {result.stderr}")
-    sys.exit(1)
+    print("Installing Tailscale...")
+    result = subprocess.run(["curl", "-fsSL", "https://tailscale.com/install.sh"], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to download Tailscale installer: {result.stderr}")
+    install_result = subprocess.run(["sh", "-c", result.stdout], capture_output=True, text=True)
+    if install_result.returncode != 0:
+        raise RuntimeError(f"Tailscale installation failed: {install_result.stderr}")
+    print("✓ Tailscale installed")
+
+# Start daemon if needed
+if daemon_running():
+    print("✓ Tailscale daemon already running")
+else:
+    print("Starting Tailscale daemon...")
+    daemon_cmd = "sudo tailscaled --tun=userspace-networking --socks5-server=localhost:1055 > /dev/null 2>&1 &"
+    subprocess.Popen(daemon_cmd, shell=True)
+    time.sleep(2)
+    if daemon_running():
+        print("✓ Tailscale daemon started")
+    else:
+        print("⚠️  Daemon may not have started correctly - check next cell")
 
 # %% [code] cell=16 id=tailscale-auth
 """CELL: Authenticate Tailscale"""
-# @title Start Tailscale and authenticate
+# @title Start Tailscale and authenticate (resumable)
 import subprocess
 
-# Check for auth key in Colab secrets
-authkey = None
-try:
-    from google.colab import userdata
-    authkey = userdata.get('TAILSCALE_AUTHKEY')
-    print("✓ Found TAILSCALE_AUTHKEY in secrets - using automatic auth")
-except Exception:
-    print("⚠️  No TAILSCALE_AUTHKEY found - using interactive auth")
+def get_tailscale_ip() -> str | None:
+    result = subprocess.run(["tailscale", "ip", "-4"], capture_output=True, text=True)
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip()
+    return None
 
-print("\nStarting Tailscale...")
+def is_connected() -> bool:
+    result = subprocess.run(["tailscale", "status"], capture_output=True, text=True)
+    output = result.stdout + result.stderr
+    # Connected if we have an IP and status doesn't show logged out
+    return get_tailscale_ip() is not None and "Logged out" not in output
 
-# Build command with or without auth key
-cmd = ["sudo", "tailscale", "up", "--hostname=colab-dlc-remote"]
-if authkey:
-    cmd.append(f"--authkey={authkey}")
-
-result = subprocess.run(cmd, capture_output=True, text=True)
-
-# Output contains status or auth URL
-output = result.stdout + result.stderr
-print(output)
-
-if result.returncode == 0:
-    print("\n" + "="*70)
-    print("✓ Tailscale authentication successful!")
+# Check if already connected
+if is_connected():
+    ip = get_tailscale_ip()
     print("="*70)
-    print("\nNext: Run the cell below to get your Tailscale IP")
-elif "https://login.tailscale.com" in output:
-    print("\n" + "="*70)
-    print("IMPORTANT: Click the authentication URL above to authorize this Colab")
+    print(f"✓ Tailscale already connected! IP: {ip}")
     print("="*70)
-    print("\nAfter clicking the link and authorizing:")
-    print("1. Run the next cell to get your Tailscale IP")
-    print("2. Then run the 'Start private API server' cell")
+    print(f"\nUse this in your Windows app: http://{ip}:7860")
+    print("\nRun the 'Start private API server' cell below.")
 else:
-    print("\n⚠️  Authentication may have failed. Check output above.")
+    # Need to authenticate
+    authkey = None
+    try:
+        from google.colab import userdata
+        authkey = userdata.get('TAILSCALE_AUTHKEY')
+        print("✓ Found TAILSCALE_AUTHKEY in secrets - using automatic auth")
+    except Exception:
+        print("⚠️  No TAILSCALE_AUTHKEY found - using interactive auth")
+
+    print("\nConnecting to Tailscale...")
+    cmd = ["sudo", "tailscale", "up", "--hostname=colab-dlc-remote"]
+    if authkey:
+        cmd.append(f"--authkey={authkey}")
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    output = result.stdout + result.stderr
+    print(output)
+
+    if result.returncode == 0:
+        ip = get_tailscale_ip()
+        print("\n" + "="*70)
+        print(f"✓ Tailscale connected! IP: {ip}")
+        print("="*70)
+        print(f"\nUse this in your Windows app: http://{ip}:7860")
+        print("\nRun the 'Start private API server' cell below.")
+    elif "https://login.tailscale.com" in output:
+        print("\n" + "="*70)
+        print("IMPORTANT: Click the authentication URL above")
+        print("="*70)
+        print("\nAfter authorizing, re-run this cell to get your IP.")
+    else:
+        print("\n⚠️  Authentication may have failed. Check output above.")
 
 # %% [code] cell=17 id=tailscale-ip
 """CELL: Display Tailscale IP"""
-# @title Get Tailscale IP address
+# @title Get Tailscale IP address (optional - shown above if connected)
 import subprocess
 
-result = subprocess.run(
-    ["tailscale", "ip", "-4"],
-    capture_output=True,
-    text=True
-)
+result = subprocess.run(["tailscale", "ip", "-4"], capture_output=True, text=True)
 
-if result.returncode == 0:
+if result.returncode == 0 and result.stdout.strip():
     tailscale_ip = result.stdout.strip()
     print("="*70)
     print(f"✓ Your Colab Tailscale IP: {tailscale_ip}")

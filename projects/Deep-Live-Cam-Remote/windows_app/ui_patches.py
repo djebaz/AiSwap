@@ -53,6 +53,47 @@ def _set_process_status(window: base.MainWindow, kind: str, text: str) -> None:
         window.output_status.setText(text)
 
 
+def _set_batch_button_running(window: base.MainWindow, kind: str) -> None:
+    """Set the batch button to 'Stop' state (danger style)."""
+    btn = getattr(window, f"{kind}_start_btn", None)
+    if btn is None:
+        return
+    btn.setText(f"Stop {kind} batch")
+    btn.setObjectName("dangerButton")
+    btn.setStyle(btn.style())  # Force style refresh
+
+
+def _set_batch_button_idle(window: base.MainWindow, kind: str) -> None:
+    """Set the batch button to 'Start' state (primary style)."""
+    btn = getattr(window, f"{kind}_start_btn", None)
+    if btn is None:
+        return
+    btn.setText(f"Start {kind[:-1] if kind.endswith('s') else kind} batch")
+    btn.setObjectName("primaryButton")
+    btn.setStyle(btn.style())  # Force style refresh
+
+
+def _is_batch_running(window: base.MainWindow) -> bool:
+    """Check if a batch job is currently active."""
+    return bool(window.active_job_id)
+
+
+def _toggle_photos_batch(window: base.MainWindow) -> None:
+    """Toggle between starting and stopping photo batch."""
+    if _is_batch_running(window):
+        cancel_job(window)
+    else:
+        start_photos(window)
+
+
+def _toggle_videos_batch(window: base.MainWindow) -> None:
+    """Toggle between starting and stopping video batch."""
+    if _is_batch_running(window):
+        cancel_job(window)
+    else:
+        start_videos(window)
+
+
 def _save_settings_from_setup(window: base.MainWindow) -> None:
     window.sync_settings()
     window.log("settings saved")
@@ -118,10 +159,10 @@ def _build_photos_tab(self: base.MainWindow) -> None:
     form.addRow("Photos output path", self.photos_output)
     layout.addLayout(form)
 
-    btn = base.QPushButton("Start photo batch")
-    btn.setObjectName("primaryButton")
-    btn.clicked.connect(self.start_photos)
-    layout.addWidget(btn)
+    self.photos_start_btn = base.QPushButton("Start photo batch")
+    self.photos_start_btn.setObjectName("primaryButton")
+    self.photos_start_btn.clicked.connect(lambda: _toggle_photos_batch(self))
+    layout.addWidget(self.photos_start_btn)
     self.photos_status = _status_label("Idle")
     layout.addWidget(self.photos_status)
     layout.addStretch(1)
@@ -164,17 +205,10 @@ def _build_videos_tab(self: base.MainWindow) -> None:
     form.addRow("Quality", self.quality)
     layout.addLayout(form)
 
-    start = base.QPushButton("Start video batch")
-    start.setObjectName("primaryButton")
-    start.clicked.connect(self.start_videos)
-    cancel = base.QPushButton("Graceful cancel active job")
-    cancel.setObjectName("dangerButton")
-    cancel.clicked.connect(self.cancel_job)
-    row = base.QHBoxLayout()
-    row.addWidget(start)
-    row.addWidget(cancel)
-    row.addStretch(1)
-    layout.addLayout(row)
+    self.videos_start_btn = base.QPushButton("Start video batch")
+    self.videos_start_btn.setObjectName("primaryButton")
+    self.videos_start_btn.clicked.connect(lambda: _toggle_videos_batch(self))
+    layout.addWidget(self.videos_start_btn)
     self.videos_status = _status_label("Idle")
     layout.addWidget(self.videos_status)
     layout.addStretch(1)
@@ -395,9 +429,16 @@ def _start_batch_with_status(self: base.MainWindow, kind: str) -> None:
     settings = async_base._copy_settings(self.settings)
     self.log(f"starting {kind} batch...")
     _set_process_status(self, kind, f"Starting {kind} batch...")
+    _set_batch_button_running(self, kind)
 
     def task() -> dict[str, Any]:
         return async_base._prepare_and_start_batch(settings, kind)
+
+    def on_job_finished(status: str, batch_kind: str) -> None:
+        self.log(f"job finished: {status}")
+        _set_process_status(self, batch_kind, f"Job finished: {status}")
+        self.active_job_id = None
+        _set_batch_button_idle(self, batch_kind)
 
     def succeeded(task_id: str, result: object) -> None:
         if task_id != self.output_batch_task_id:
@@ -414,14 +455,13 @@ def _start_batch_with_status(self: base.MainWindow, kind: str) -> None:
                 self.poller.stop()
             self.poller = base.PollWorker(self.client, self.active_job_id)
             self.poller.message.connect(lambda text, batch_kind=kind: _poll_message(self, batch_kind, text))
-            self.poller.finished_status.connect(
-                lambda status, batch_kind=kind: (
-                    self.log(f"job finished: {status}"),
-                    _set_process_status(self, batch_kind, f"Job finished: {status}"),
-                )
-            )
+            self.poller.finished_status.connect(lambda status, batch_kind=kind: on_job_finished(status, batch_kind))
             self.poller.start()
-        _set_process_status(self, kind, f"{kind} batch started")
+            _set_process_status(self, kind, f"{kind} batch running...")
+        else:
+            # No job ID means it didn't start properly
+            _set_batch_button_idle(self, kind)
+            _set_process_status(self, kind, f"{kind} batch failed to start")
 
     def failed(task_id: str, error: str) -> None:
         if task_id != self.output_batch_task_id:
@@ -429,6 +469,7 @@ def _start_batch_with_status(self: base.MainWindow, kind: str) -> None:
         text = f"{kind} batch failed before start: {error}"
         _set_process_status(self, kind, text)
         self.log(text)
+        _set_batch_button_idle(self, kind)
 
     self.output_batch_task_id = async_base._start_output_task(
         self,
