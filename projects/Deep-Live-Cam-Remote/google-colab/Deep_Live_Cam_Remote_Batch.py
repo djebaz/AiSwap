@@ -7,16 +7,78 @@
 # Deep-Live-Cam Remote — Colab batch processor
 
 Self-contained, path-based photo/video batch face swap with an optional private Tailscale HTTP/WebSocket controller for the Windows app.
+
+## Quick Start
+
+**For batch processing (most common):**
+1. Mount Google Drive (section 1)
+2. Clone repository and install dependencies (section 2)
+3. Upload your source face image to: `MyDrive/DeepLiveCamRemote/source/source.png`
+4. Upload videos to: `MyDrive/DeepLiveCamRemote/videos/`
+5. Configure settings (section 3)
+6. Run batch processor (section 4)
+7. Download results (section 5)
+
+**For Windows remote app:**
+1. Complete sections 1-2 above
+2. Install Tailscale (section 6a)
+3. Start API server (section 6b)
+4. Use the displayed IP in your Windows app
+
+**For photo batches in Colab:**
+- Follow sections 1-3, then run section 7
 """ENDMARKDOWN
 
-# %% [markdown] cell=1 id=setup-heading
+# %% [markdown] cell=1 id=mount-heading
 """MARKDOWN
-## 1. Clone repository and install dependencies
+## 1. Mount Google Drive
+
+Mount your Google Drive to access source images, videos, and save processed outputs.
+"""ENDMARKDOWN
+
+# %% [code] cell=2 id=mount-drive
+"""CELL: Mount Google Drive"""
+# @title Mount Google Drive
+from google.colab import drive
+from pathlib import Path
+
+drive.mount('/content/drive')
+
+# Create folder structure automatically
+DRIVE_ROOT = Path("/content/drive/MyDrive/DeepLiveCamRemote")
+folders = [
+    DRIVE_ROOT / "source",
+    DRIVE_ROOT / "photos",
+    DRIVE_ROOT / "videos",
+    DRIVE_ROOT / "outputs" / "photos",
+    DRIVE_ROOT / "outputs" / "videos",
+]
+
+print("Creating folder structure...")
+for folder in folders:
+    folder.mkdir(parents=True, exist_ok=True)
+    print(f"  ✓ {folder.relative_to(Path('/content/drive/MyDrive'))}")
+
+print("\n" + "="*70)
+print("✓ Google Drive mounted and folder structure ready!")
+print("="*70)
+print("\nNext steps:")
+print("1. Upload your source face image to:")
+print("   MyDrive/DeepLiveCamRemote/source/source.png")
+print("2. Upload videos to process to:")
+print("   MyDrive/DeepLiveCamRemote/videos/")
+print("3. Or upload photos to:")
+print("   MyDrive/DeepLiveCamRemote/photos/")
+print("\nThen run the next cell to install dependencies.")
+
+# %% [markdown] cell=3 id=setup-heading
+"""MARKDOWN
+## 2. Clone repository and install dependencies
 
 **Note**: Currently clones from the `feature/windows-remote-app` branch. Change `REPO_BRANCH` to `"main"` after the PR is merged.
 """ENDMARKDOWN
 
-# %% [code] cell=2 id=setup
+# %% [code] cell=4 id=setup
 """CELL: Clone and install"""
 # @title Clone and install
 import os
@@ -165,12 +227,12 @@ print(f"✓ Runtime ready: {WORK_DIR}")
 print(f"✓ Python path: {sys.path[0]}")
 print(f"✓ Working directory: {os.getcwd()}")
 
-# %% [markdown] cell=4 id=config-heading
+# %% [markdown] cell=5 id=config-heading
 """MARKDOWN
-## 2. Configure Colab paths and processing options
+## 3. Configure Colab paths and processing options
 """ENDMARKDOWN
 
-# %% [code] cell=5 id=config
+# %% [code] cell=6 id=config
 """CELL: Batch configuration"""
 # @title Batch configuration
 DRIVE_ROOT = "/content/drive/MyDrive/DeepLiveCamRemote"
@@ -194,25 +256,25 @@ INTERPOLATION_WEIGHT = 0.0
 ENHANCER = "none"  # none, gfpgan, gpen256, gpen512
 MAPPING_JSON = None  # e.g. "/content/mapping/face_mapping.json"
 
-# %% [markdown] cell=6 id=mapping-heading
+# %% [markdown] cell=7 id=mapping-heading
 """MARKDOWN
-## 3. Optional: scan identities and edit mapping JSON
+## 4. Optional: scan identities and edit mapping JSON
 Run this before processing only when different target identities need different source faces. Set each generated `source_path`, then set `MAPPING_JSON` above.
 """ENDMARKDOWN
 
-# %% [code] cell=7 id=mapping
+# %% [code] cell=8 id=mapping
 """CELL: Scan identity gallery (optional)"""
 # @title Scan identity gallery (optional)
 from colab_batch import main
 MAPPING_DIR = "/content/mapping"
 main(["scan", "--input-dir", INPUT_DIR, "--mapping-dir", MAPPING_DIR])
 
-# %% [markdown] cell=8 id=process-heading
+# %% [markdown] cell=9 id=process-heading
 """MARKDOWN
-## 4. Process folder and create ZIP
+## 5. Process folder and create ZIP
 """ENDMARKDOWN
 
-# %% [code] cell=9 id=process
+# %% [code] cell=10 id=process
 """CELL: Run batch processor"""
 # @title Run batch processor
 from colab_batch import main
@@ -226,30 +288,30 @@ if COLOR_CORRECTION: args += ["--color-correction"]
 exit_code = main(args)
 print("Batch exit code:", exit_code)
 
-# %% [markdown] cell=10 id=download-heading
+# %% [markdown] cell=11 id=download-heading
 """MARKDOWN
-## 5. Download ZIP
+## 6. Download ZIP
 """ENDMARKDOWN
 
-# %% [code] cell=11 id=download
+# %% [code] cell=12 id=download
 """CELL: Download result archive"""
 # @title Download result archive
 from google.colab import files
 files.download(ZIP_PATH)
 
-# %% [markdown] cell=12 id=api-heading
+# %% [markdown] cell=13 id=api-heading
 """MARKDOWN
-## 6. Optional: start private Windows app API
+## 7. Optional: start private Windows app API
 Run this after connecting Colab to Tailscale. The Windows app connects to `http://TAILSCALE_IP:7860`.
 """ENDMARKDOWN
 
-# %% [markdown] cell=13 id=tailscale-setup-heading
+# %% [markdown] cell=14 id=tailscale-setup-heading
 """MARKDOWN
-### 6a. Install and configure Tailscale
+### 7a. Install and configure Tailscale
 Run these cells to set up secure private networking. Click the auth URL to add this Colab instance to your Tailscale network.
 """ENDMARKDOWN
 
-# %% [code] cell=14 id=tailscale-install
+# %% [code] cell=15 id=tailscale-install
 """CELL: Install Tailscale"""
 # @title Install Tailscale
 import subprocess
@@ -276,7 +338,7 @@ else:
     print(f"Download error: {result.stderr}")
     sys.exit(1)
 
-# %% [code] cell=15 id=tailscale-auth
+# %% [code] cell=16 id=tailscale-auth
 """CELL: Authenticate Tailscale"""
 # @title Start Tailscale and authenticate
 import subprocess
@@ -303,7 +365,7 @@ if "https://login.tailscale.com" in output:
     print("2. Then run the 'Start private API server' cell")
     print("="*70)
 
-# %% [code] cell=16 id=tailscale-ip
+# %% [code] cell=17 id=tailscale-ip
 """CELL: Display Tailscale IP"""
 # @title Get Tailscale IP address
 import subprocess
@@ -327,13 +389,13 @@ else:
     print("2. Clicked the auth URL in the 'Authenticate Tailscale' cell")
     print("3. Authorized the Colab instance in your Tailscale admin panel")
 
-# %% [markdown] cell=17 id=start-api-heading
+# %% [markdown] cell=18 id=start-api-heading
 """MARKDOWN
-### 6b. Start the API server
+### 7b. Start the API server
 Run this cell after Tailscale is configured and you have your IP address.
 """ENDMARKDOWN
 
-# %% [code] cell=18 id=start-api
+# %% [code] cell=19 id=start-api
 """CELL: Start private API server"""
 # @title Start private API server
 import sys
@@ -366,12 +428,12 @@ print("✓ The server is running in the background")
 print("✓ Connect your Tailscale network and use the Tailscale IP with the Windows app")
 print("\nPress Ctrl+C or stop the cell to terminate the server.")
 
-# %% [markdown] cell=19 id=photos-heading
+# %% [markdown] cell=20 id=photos-heading
 """MARKDOWN
-## 7. Optional: run photo batch directly in Colab
+## 8. Optional: run photo batch directly in Colab
 """ENDMARKDOWN
 
-# %% [code] cell=20 id=photos
+# %% [code] cell=21 id=photos
 """CELL: Run photo batch processor"""
 # @title Run photo batch processor
 from colab_batch import main
