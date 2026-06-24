@@ -59,6 +59,10 @@ else:
     REPO_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}.git"
     print("Using public clone (repo is public)")
 
+# Ensure we're in a valid directory before git operations
+os.chdir("/content")
+
+# Clean up any existing directories
 if WORK_DIR.exists():
     print(f"Removing existing directory: {WORK_DIR}")
     import shutil
@@ -74,7 +78,8 @@ print(f"Cloning {REPO_OWNER}/{REPO_NAME} (branch: {REPO_BRANCH})...")
 result = subprocess.run(
     ["git", "clone", "--depth=1", "--branch", REPO_BRANCH, REPO_URL, str(TEMP_CLONE)],
     capture_output=True,
-    text=True
+    text=True,
+    cwd="/content"  # Ensure git runs from valid directory
 )
 if result.returncode != 0:
     # Don't expose PAT in error message
