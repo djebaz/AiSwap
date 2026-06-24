@@ -27,16 +27,34 @@ REPO_OWNER = "djebaz"
 REPO_NAME = "AiSwap"
 WORK_DIR = Path("/content/Deep-Live-Cam-Remote")
 
-# Try to get GitHub PAT from Colab secrets for private repo access
+# Try public clone first (faster and works for public repos)
+import urllib.request
+import json
 try:
-    from google.colab import userdata
-    GH_PAT = userdata.get('GH_PAT')
-    REPO_URL = f"https://{GH_PAT}@github.com/{REPO_OWNER}/{REPO_NAME}.git"
-    print("Using authenticated clone (private repo access)")
+    # Check if repo is public using GitHub API
+    api_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}"
+    req = urllib.request.Request(api_url)
+    with urllib.request.urlopen(req, timeout=5) as response:
+        repo_info = json.loads(response.read().decode())
+        is_private = repo_info.get("private", True)
 except Exception:
-    # Fall back to public clone if no PAT is available
+    # If we can't check, assume it might be private
+    is_private = True
+
+# Use PAT if repo is private, otherwise use public URL
+if is_private:
+    try:
+        from google.colab import userdata
+        GH_PAT = userdata.get('GH_PAT')
+        REPO_URL = f"https://{GH_PAT}@github.com/{REPO_OWNER}/{REPO_NAME}.git"
+        print("Using authenticated clone (private repo)")
+    except Exception as e:
+        print(f"Warning: Repository appears private but no GH_PAT available: {e}")
+        print("Attempting public clone anyway...")
+        REPO_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}.git"
+else:
     REPO_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}.git"
-    print("Using public clone (no authentication)")
+    print("Using public clone (repo is public)")
 
 if WORK_DIR.exists():
     print(f"Removing existing directory: {WORK_DIR}")
@@ -50,7 +68,21 @@ if TEMP_CLONE.exists():
     shutil.rmtree(TEMP_CLONE)
 
 print(f"Cloning {REPO_OWNER}/{REPO_NAME}...")
-subprocess.run(["git", "clone", "--depth=1", "--branch=main", REPO_URL, str(TEMP_CLONE)], check=True)
+result = subprocess.run(
+    ["git", "clone", "--depth=1", "--branch=main", REPO_URL, str(TEMP_CLONE)],
+    capture_output=True,
+    text=True
+)
+if result.returncode != 0:
+    # Don't expose PAT in error message
+    error_msg = result.stderr.replace(REPO_URL, f"https://github.com/{REPO_OWNER}/{REPO_NAME}.git")
+    print(f"Clone failed with exit code {result.returncode}")
+    print(f"Error output:\n{error_msg}")
+    raise RuntimeError(f"Failed to clone repository. Check that:\n"
+                      f"1. Repository exists: https://github.com/{REPO_OWNER}/{REPO_NAME}\n"
+                      f"2. Branch 'main' exists\n"
+                      f"3. GH_PAT has correct permissions (repo scope)\n"
+                      f"4. GH_PAT is not expired")
 
 # Move the Deep-Live-Cam-Remote subdirectory
 import shutil
