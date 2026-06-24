@@ -41,11 +41,31 @@ Mount your Google Drive to access source images, videos, and save processed outp
 # @title Mount Google Drive
 from google.colab import drive
 from pathlib import Path
+import os
 
-drive.mount('/content/drive')
+# Check if already mounted
+already_mounted = os.path.ismount('/content/drive')
+
+if not already_mounted:
+    try:
+        drive.mount('/content/drive')
+        print("✓ Google Drive mounted successfully")
+    except Exception as e:
+        print(f"Drive mount error: {e}")
+        print("If Drive is already mounted, you can continue.")
+else:
+    print("✓ Google Drive already mounted")
+
+# Verify Drive is accessible
+DRIVE_ROOT = Path("/content/drive/MyDrive/DeepLiveCamRemote")
+if not Path("/content/drive/MyDrive").exists():
+    raise RuntimeError(
+        "Google Drive not accessible!\n"
+        "Make sure Drive is mounted at /content/drive\n"
+        "Try running: from google.colab import drive; drive.mount('/content/drive', force_remount=True)"
+    )
 
 # Create folder structure automatically
-DRIVE_ROOT = Path("/content/drive/MyDrive/DeepLiveCamRemote")
 folders = [
     DRIVE_ROOT / "source",
     DRIVE_ROOT / "photos",
@@ -54,13 +74,13 @@ folders = [
     DRIVE_ROOT / "outputs" / "videos",
 ]
 
-print("Creating folder structure...")
+print("\nCreating folder structure...")
 for folder in folders:
     folder.mkdir(parents=True, exist_ok=True)
     print(f"  ✓ {folder.relative_to(Path('/content/drive/MyDrive'))}")
 
 print("\n" + "="*70)
-print("✓ Google Drive mounted and folder structure ready!")
+print("✓ Folder structure ready!")
 print("="*70)
 print("\nNext steps:")
 print("1. Upload your source face image to:")
