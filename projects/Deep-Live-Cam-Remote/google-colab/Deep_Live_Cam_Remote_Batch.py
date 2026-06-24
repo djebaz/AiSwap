@@ -112,7 +112,18 @@ if str(WORK_DIR) not in sys.path:
 
 # Show GPU info
 subprocess.run(["nvidia-smi"], check=False)
-print("Runtime ready:", WORK_DIR)
+
+# Verify critical files exist
+critical_files = ["colab_api.py", "colab_batch.py", "modules/__init__.py"]
+missing_files = [f for f in critical_files if not (WORK_DIR / f).exists()]
+if missing_files:
+    print(f"ERROR: Missing critical files: {missing_files}")
+    print(f"Directory contents: {list(WORK_DIR.glob('*'))}")
+    raise RuntimeError(f"Repository clone incomplete. Missing: {missing_files}")
+
+print(f"✓ Runtime ready: {WORK_DIR}")
+print(f"✓ Python path: {sys.path[0]}")
+print(f"✓ Working directory: {os.getcwd()}")
 
 # %% [markdown] cell=4 id=config-heading
 """MARKDOWN
@@ -195,6 +206,18 @@ Run this after connecting Colab to Tailscale. The Windows app connects to `http:
 # %% [code] cell=13 id=start-api
 """CELL: Start private API server"""
 # @title Start private API server
+import sys
+from pathlib import Path
+
+# Verify setup was run first
+WORK_DIR = Path("/content/Deep-Live-Cam-Remote")
+if not WORK_DIR.exists() or str(WORK_DIR) not in sys.path:
+    raise RuntimeError(
+        "Setup cell not completed successfully! Please run the 'Clone and install' cell first.\n"
+        f"Expected directory: {WORK_DIR}\n"
+        f"Current sys.path: {sys.path[:3]}"
+    )
+
 from colab_api import ensure_drive_layout, main as api_main
 ensure_drive_layout()
 api_main(["--host", "0.0.0.0", "--port", "7860"])
