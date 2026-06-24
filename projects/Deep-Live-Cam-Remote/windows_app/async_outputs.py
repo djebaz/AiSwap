@@ -38,6 +38,8 @@ def _ensure_output_worker_state(window: base.MainWindow) -> None:
         window.output_download_task_id = ""
     if not hasattr(window, "output_health_task_id"):
         window.output_health_task_id = ""
+    if not hasattr(window, "output_batch_task_id"):
+        window.output_batch_task_id = ""
 
 
 def _start_output_task(
@@ -57,6 +59,93 @@ def _start_output_task(
     worker.finished.connect(lambda task_id=task_id: window.output_workers.pop(task_id, None))
     worker.start()
     return task_id
+
+
+def _copy_settings(settings: base.AppSettings) -> base.AppSettings:
+    return base.AppSettings(**base.asdict(settings))
+
+
+def _prepare_and_start_batch(settings: base.AppSettings, kind: str) -> dict[str, Any]:
+    client = base.ApiClient(settings)
+    logs: list[str] = ["checking Colab API before starting batch"]
+    client.request_json("GET", "/health", timeout=5.0)
+
+    source_face = settings.source_face
+    if base.is_local_path(source_face):
+        source_path = Path(source_face)
+        if not source_path.is_file():
+            raise FileNotFoundError(f"Local source face does not exist: {source_face}")
+        logs.append(f"uploading local source face: {source_path}")
+        response = client.upload_file("/upload/file?kind=source", source_path, timeout=30.0)
+        source_face = str(response.get("path") or source_face)
+        logs.append(f"source uploaded to: {source_face}")
+
+    input_path = settings.photos_input if kind == "photos" else settings.videos_input
+    output_path = settings.photos_output if kind == "photos" else settings.videos_output
+    input_dir = input_path
+    output_dir = output_path
+    if base.is_local_path(input_path):
+        extensions = base.PHOTO_EXTENSIONS if kind == "photos" else base.VIDEO_EXTENSIONS
+        files = base.local_files(input_path, extensions, settings.recursive)
+        if not files:
+            raise FileNotFoundError(f"No supported {kind} files found in local path: {input_path}")
+        logs.append(f"uploading {len(files)} local {kind} file(s)")
+        response = client.upload_files(f"/upload/{kind}", files, timeout=600.0)
+        input_dir = str(response.get("input_dir") or input_path)
+        if base.is_local_path(output_path):
+            output_dir = str(response.get("output_dir") or output_path)
+            logs.append(f"local output path is not reachable from Colab; using: {output_dir}")
+        logs.append(f"{kind} uploaded to: {input_dir}")
+
+    endpoint = "/jobs/photos" if kind == "photos" else "/jobs/videos"
+    payload = base.job_payload(settings, input_dir, output_dir, source_face)
+    response = client.request_json("POST", endpoint, payload, timeout=10.0)
+    logs.append(f"started {endpoint}: {response}")
+    return {"endpoint": endpoint, "response": response, "logs": logs}
+
+
+def _start_batch(self: base.MainWindow, kind: str) -> None:
+    self.sync_settings()
+    self.tabs.setCurrentWidget(self.log_box)
+    _ensure_output_worker_state(self)
+    settings = _copy_settings(self.settings)
+    self.log(f"starting {kind} batch...")
+
+    def task() -> dict[str, Any]:
+        return _prepare_and_start_batch(settings, kind)
+
+    def succeeded(task_id: str, result: object) -> None:
+        if task_id != self.output_batch_task_id:
+            return
+        payload = result if isinstance(result, dict) else {}
+        for line in payload.get("logs") or []:
+            self.log(str(line))
+        response = payload.get("response") if isinstance(payload.get("response"), dict) else {}
+        self.active_job_id = response.get("job_id")
+        if self.active_job_id:
+            if self.poller:
+                self.poller.stop()
+            self.poller = base.PollWorker(self.client, self.active_job_id)
+            self.poller.message.connect(self.log)
+            self.poller.finished_status.connect(lambda status: self.log(f"job finished: {status}"))
+            self.poller.start()
+        self.output_status.setText(f"{kind} batch started")
+
+    def failed(task_id: str, error: str) -> None:
+        if task_id != self.output_batch_task_id:
+            return
+        self.output_status.setText(f"{kind} batch failed before start: {error}")
+        self.log(f"{kind} batch failed before start: {error}")
+
+    self.output_batch_task_id = _start_output_task(self, f"Starting {kind} batch...", task, succeeded, failed)
+
+
+def start_photos(self: base.MainWindow) -> None:
+    _start_batch(self, "photos")
+
+
+def start_videos(self: base.MainWindow) -> None:
+    _start_batch(self, "videos")
 
 
 def refresh_outputs(self: base.MainWindow) -> None:
@@ -268,6 +357,8 @@ def check_connection(self: base.MainWindow) -> None:
 
 def install() -> None:
     base.MainWindow.check_connection = check_connection
+    base.MainWindow.start_photos = start_photos
+    base.MainWindow.start_videos = start_videos
     base.MainWindow.refresh_outputs = refresh_outputs
     base.MainWindow.show_output_at = show_output_at
     base.MainWindow.show_video_output = show_video_output
