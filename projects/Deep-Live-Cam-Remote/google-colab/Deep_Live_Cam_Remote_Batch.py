@@ -247,6 +247,7 @@ Run this after connecting Colab to Tailscale. The Windows app connects to `http:
 """CELL: Start private API server"""
 # @title Start private API server
 import sys
+import threading
 from pathlib import Path
 
 # Verify setup was run first
@@ -258,9 +259,22 @@ if not WORK_DIR.exists() or str(WORK_DIR) not in sys.path:
         f"Current sys.path: {sys.path[:3]}"
     )
 
-from colab_api import ensure_drive_layout, main as api_main
+from colab_api import ensure_drive_layout, app
+
 ensure_drive_layout()
-api_main(["--host", "0.0.0.0", "--port", "7860"])
+
+# Run uvicorn in a background thread to avoid asyncio event loop conflicts
+def run_server():
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=7860)
+
+server_thread = threading.Thread(target=run_server, daemon=True)
+server_thread.start()
+
+print("✓ API server starting on http://0.0.0.0:7860")
+print("✓ The server is running in the background")
+print("✓ Connect your Tailscale network and use the Tailscale IP with the Windows app")
+print("\nPress Ctrl+C or stop the cell to terminate the server.")
 
 # %% [markdown] cell=14 id=photos-heading
 """MARKDOWN
