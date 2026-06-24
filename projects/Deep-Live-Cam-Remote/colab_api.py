@@ -62,6 +62,8 @@ class JobRequest(BaseModel):
     max_width: int = 420
     quality: int = 18
     encoder: str = "auto"
+    start_pct: float = 0.0
+    end_pct: float = 100.0
 
 
 class CancelRequest(BaseModel):
@@ -400,6 +402,8 @@ def start_videos(request: JobRequest) -> dict[str, Any]:
         "--max-width", str(request.max_width),
         "--quality", str(request.quality),
         "--encoder", request.encoder,
+        "--start-pct", str(request.start_pct),
+        "--end-pct", str(request.end_pct),
     ]
     job = start_job("videos", argv)
     return {"job_id": job.job_id, "status": job.status}

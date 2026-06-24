@@ -192,6 +192,24 @@ def _build_videos_tab(self: base.MainWindow) -> None:
     self.quality = base.QSpinBox()
     self.quality.setRange(0, 51)
     self.quality.setValue(self.settings.quality)
+
+    # Video segment range (percentage)
+    self.start_pct = base.QDoubleSpinBox()
+    self.start_pct.setRange(0, 99)
+    self.start_pct.setValue(self.settings.start_pct)
+    self.start_pct.setSuffix("%")
+    self.start_pct.setDecimals(1)
+    self.end_pct = base.QDoubleSpinBox()
+    self.end_pct.setRange(1, 100)
+    self.end_pct.setValue(self.settings.end_pct)
+    self.end_pct.setSuffix("%")
+    self.end_pct.setDecimals(1)
+    range_row = base.QHBoxLayout()
+    range_row.addWidget(self.start_pct)
+    range_row.addWidget(base.QLabel("to"))
+    range_row.addWidget(self.end_pct)
+    range_row.addStretch(1)
+
     videos_input_row = self._path_row(
         self.videos_input,
         lambda: self._browse_folder(self.videos_input, "Select videos input folder"),
@@ -200,6 +218,7 @@ def _build_videos_tab(self: base.MainWindow) -> None:
     form.addRow("Source face path", source_row)
     form.addRow("Videos input path", videos_input_row)
     form.addRow("Videos output path", self.videos_output)
+    form.addRow("Process range", range_row)
     form.addRow("Max FPS", self.max_fps)
     form.addRow("Max width", self.max_width)
     form.addRow("Quality", self.quality)

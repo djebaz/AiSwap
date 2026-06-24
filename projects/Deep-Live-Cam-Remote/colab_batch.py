@@ -40,6 +40,8 @@ class ProcessConfig:
     map_config: Path | None
     ss: float = 0.0
     duration: float | None = None
+    start_pct: float = 0.0
+    end_pct: float = 100.0
     max_fps: float = 30.0
     max_width: int = 420
     decode_queue: int = 6
@@ -344,16 +346,31 @@ class ModernEngine:
 
 
 def effective_segment(info: dict[str, Any], config: ProcessConfig, path: Path) -> tuple[float, float | None]:
-    start = config.ss
-    duration = info["duration"]
-    if duration is not None and start >= duration:
-        if config.short_video_policy == "start":
-            print(f"  ! shorter than SS={start:g}; using SS=0")
-            start = 0.0
-        else:
-            raise ValueError(f"SS={start} is beyond the end of {path.name}")
-    remaining = None if duration is None else max(0.0, duration - start)
-    clip = remaining if config.duration is None else config.duration if remaining is None else min(config.duration, remaining)
+    video_duration = info["duration"]
+
+    # If explicit ss/duration are set, use them (legacy behavior)
+    if config.ss > 0 or config.duration is not None:
+        start = config.ss
+        if video_duration is not None and start >= video_duration:
+            if config.short_video_policy == "start":
+                print(f"  ! shorter than SS={start:g}; using SS=0")
+                start = 0.0
+            else:
+                raise ValueError(f"SS={start} is beyond the end of {path.name}")
+        remaining = None if video_duration is None else max(0.0, video_duration - start)
+        clip = remaining if config.duration is None else config.duration if remaining is None else min(config.duration, remaining)
+    # Otherwise, use percentage-based range
+    elif video_duration is not None and (config.start_pct > 0 or config.end_pct < 100):
+        start = video_duration * (config.start_pct / 100.0)
+        end = video_duration * (config.end_pct / 100.0)
+        clip = max(0.0, end - start)
+        if clip <= 0:
+            raise ValueError(f"Invalid percentage range: {config.start_pct}% to {config.end_pct}%")
+    else:
+        # Full video
+        start = 0.0
+        clip = video_duration
+
     if clip is not None and clip <= 0:
         raise ValueError("No video remains after seek")
     return start, clip
@@ -554,7 +571,8 @@ def process_batch(args: argparse.Namespace) -> int:
         input_dir=Path(args.input_dir), output_dir=Path(args.output_dir),
         source_face=Path(args.source_face) if args.source_face else None,
         map_config=Path(args.map_config) if args.map_config else None,
-        ss=args.ss, duration=args.duration, max_fps=args.max_fps, max_width=args.max_width,
+        ss=args.ss, duration=args.duration, start_pct=args.start_pct, end_pct=args.end_pct,
+        max_fps=args.max_fps, max_width=args.max_width,
         decode_queue=args.decode_queue, encode_queue=args.encode_queue, recursive=args.recursive,
         overwrite=args.overwrite, skip_processed=args.skip_processed,
         short_video_policy=args.short_video_policy, cuda_decode=args.cuda_decode,
@@ -705,6 +723,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_process_args(process)
     process.add_argument("--zip-output")
     process.add_argument("--ss", type=float, default=0.0); process.add_argument("--duration", type=float)
+    process.add_argument("--start-pct", type=float, default=0.0); process.add_argument("--end-pct", type=float, default=100.0)
     process.add_argument("--max-fps", type=float, default=30.0); process.add_argument("--max-width", type=int, default=420)
     process.add_argument("--decode-queue", type=int, default=6); process.add_argument("--encode-queue", type=int, default=6)
     process.add_argument("--short-video-policy", choices=["start", "skip"], default="start")
@@ -724,6 +743,10 @@ def main(argv: list[str] | None = None) -> int:
     if getattr(args, "duration", None) is not None and args.duration <= 0: raise ValueError("--duration must be positive")
     if getattr(args, "max_fps", 1) <= 0 or getattr(args, "max_width", 1) <= 0: raise ValueError("FPS and width limits must be positive")
     if not 0 <= getattr(args, "opacity", 1) <= 1: raise ValueError("--opacity must be between 0 and 1")
+    start_pct, end_pct = getattr(args, "start_pct", 0.0), getattr(args, "end_pct", 100.0)
+    if not 0 <= start_pct < 100: raise ValueError("--start-pct must be between 0 and 99")
+    if not 0 < end_pct <= 100: raise ValueError("--end-pct must be between 1 and 100")
+    if start_pct >= end_pct: raise ValueError("--start-pct must be less than --end-pct")
     return args.func(args)
 
 

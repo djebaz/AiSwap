@@ -70,6 +70,8 @@ class AppSettings:
     max_fps: float = 30.0
     max_width: int = 420
     quality: int = 18
+    start_pct: float = 0.0
+    end_pct: float = 100.0
     camera_index: int = 0
     virtual_camera: str = "OBS Virtual Camera"
 
@@ -216,6 +218,8 @@ def job_payload(settings: AppSettings, input_dir: str, output_dir: str, source_f
         "max_fps": settings.max_fps,
         "max_width": settings.max_width,
         "quality": settings.quality,
+        "start_pct": settings.start_pct,
+        "end_pct": settings.end_pct,
     }
 
 
@@ -382,6 +386,8 @@ class MainWindow(QMainWindow):
         self.settings.max_fps = float(self.max_fps.value())
         self.settings.max_width = int(self.max_width.value())
         self.settings.quality = int(self.quality.value())
+        self.settings.start_pct = float(self.start_pct.value())
+        self.settings.end_pct = float(self.end_pct.value())
         self.settings.camera_index = int(self.camera_index.value())
         self.settings.virtual_camera = self.virtual_camera.text().strip()
         save_settings(self.settings)
