@@ -45,6 +45,19 @@
 - The remote app/backend is intentionally remote-only and does not add NSFW filtering, consent modals, or safety-gate UI.
 - Photo batches use `python colab_batch.py photos ...`; video batches use `python colab_batch.py process ...`. Keep output paths mirrored relative to the selected input root.
 
+### Windows App Features
+- **Dark title bar** on Windows 10/11 via DWM API; custom app icon in title bar/taskbar.
+- **Photos and Videos tabs** both expose full processing options: recursive, overwrite, skip processed, many faces, enhancer, opacity, sharpness, mouth mask, interpolation, poisson blend, color correction.
+- **Video percentage range**: start/end % spinboxes to process only a portion of videos.
+- **Start/Stop toggle**: batch start buttons switch to red Stop when running; cancel is graceful.
+- **Outputs tab**: resizable split view with list panel and preview/player; autoplay with prefetch.
+- **Local file upload**: source faces and input folders can be local Windows paths; the app uploads to Colab before starting jobs.
+- **Settings sync**: changes in one tab (Photos/Videos) sync to the other when saving or starting jobs.
+
+### Colab Notebook Features
+- **Resumable cells**: Clone/install, Tailscale install, and Tailscale auth cells skip already-completed steps.
+- **Auto-update on re-run**: Setup cell runs `git pull` when repo already exists, so code updates apply without deleting the cloned directory.
+
 ## Notebook Round-Trip
 
 The `Deep_Live_Cam_Remote_Batch.ipynb` Colab notebook uses git clone to fetch the latest code from this repository. Changes to the notebook structure should be made in the markerized `.py` source and rebuilt to `.ipynb`.

@@ -28,7 +28,7 @@
 - [x] Update docs: add Windows app usage to `projects/Deep-Live-Cam-Remote/README.md`, add repo guidance to `AGENTS.md`, and link this plan from the relevant devdocs feature note.
 - [x] If notebook changes are required, edit `projects/Deep-Live-Cam-Remote/google-colab/Deep_Live_Cam_Remote_Batch.py`, then rebuild `Deep_Live_Cam_Remote_Batch.ipynb` with `$ipynb-roundtrip` and remove temporary round-trip files.
 - [x] Minimal validation only under `$fast-implement`: ran `python -m py_compile` for changed Python files; did not run unit tests or smoke tests; final checks are deferred to the user.
-- [ ] Prepare handoff: summarize touched files, commands added, remaining manual checks for photo batch/video/live webcam, and any known limitations around Colab/Tailscale availability.
+- [x] Prepare handoff: summarize touched files, commands added, remaining manual checks for photo batch/video/live webcam, and any known limitations around Colab/Tailscale availability.
 
 ## Decisions and Design Changes
 - 2026-06-24 Use a dedicated Windows app wrapper around `Deep-Live-Cam-Remote` instead of porting the older reference GUI wholesale; this avoids copying stale upstream code and keeps the modern batch pipeline authoritative.
@@ -43,3 +43,32 @@
 ## Validation
 - [x] `python -m py_compile` completed for changed Python files.
 - [ ] Unit tests and smoke tests deferred to user.
+
+## Handoff Summary
+
+### Key Files
+- `windows_app/app.py` - Main app with settings, API client, workers
+- `windows_app/ui_patches.py` - UI enhancements (tabs, outputs, sync)
+- `windows_app/async_outputs.py` - Async output fetching/preview
+- `windows_app/icon.ico` - App icon
+- `colab_api.py` - FastAPI server with job endpoints
+- `colab_batch.py` - Batch processor (photos/videos)
+- `google-colab/Deep_Live_Cam_Remote_Batch.py` - Markerized notebook source
+- `google-colab/Deep_Live_Cam_Remote_Batch.ipynb` - Colab notebook
+
+### Launch Commands
+```powershell
+# Windows app
+.\run_windows_remote_app.ps1
+
+# Or directly
+.\.venv\Scripts\python.exe run_windows_remote_app.py
+```
+
+### Latest Features (PR #3)
+- Dark title bar + custom icon
+- Full processing options on both Photos/Videos tabs
+- Video percentage range (start/end %)
+- Start/Stop toggle with graceful cancel
+- Resumable Colab cells with auto git pull
+- Settings sync between tabs

@@ -1,7 +1,7 @@
-<h1 align="center">Deep-Live-Cam 2.1.6</h1>
+<h1 align="center">Deep-Live-Cam Remote</h1>
 
 <p align="center">
-  Real-time face swap and video deepfake with a single click and only a single image.
+  Colab-native batch face swap with a Windows remote controller over Tailscale.
 </p>
 
 <p align="center">
@@ -66,6 +66,19 @@ py -3.11 -m venv .venv
 Enter the Colab Tailscale IP and port `7860`, then use the Photos, Videos, or
 Live tabs. Photo and video jobs mirror relative input folders under the selected
 output path. Cancel requests are graceful and stop before the next queued file.
+
+#### Windows App Features
+- **Dark title bar** and custom app icon
+- **Full processing options** on both Photos and Videos tabs: recursive, overwrite, skip processed, many faces, enhancer, opacity, sharpness, mouth mask, interpolation, poisson blend, color correction
+- **Video percentage range**: start/end % to process only a portion of videos
+- **Start/Stop toggle**: buttons switch to red Stop when running
+- **Outputs tab**: resizable split view with preview/player and autoplay
+- **Local file support**: source faces and inputs can be local Windows paths (uploaded automatically)
+- **Settings sync**: changes in one tab sync to the other
+
+#### Colab Notebook Features
+- **Resumable cells**: re-run after session restart completes in seconds
+- **Auto-update**: setup cell runs `git pull` when repo exists
 
 Photo CLI usage is also available directly in Colab:
 
