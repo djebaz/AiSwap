@@ -11,6 +11,8 @@ from PySide6.QtWidgets import QFileDialog, QListWidgetItem
 
 from windows_app import app as base
 
+DOWNLOAD_CHUNK_SIZE = 8 * 1024 * 1024
+
 
 class OutputTaskWorker(QThread):
     succeeded = Signal(str, object)
@@ -26,6 +28,17 @@ class OutputTaskWorker(QThread):
             self.succeeded.emit(self.task_id, self.task())
         except Exception as exc:
             self.failed.emit(self.task_id, str(exc))
+
+
+def _download_file_fast(client: base.ApiClient, path: str, destination: Path, timeout: float = 900.0) -> Path:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with base.urllib.request.urlopen(client.url(path), timeout=timeout) as response, destination.open("wb") as handle:
+        while True:
+            chunk = response.read(DOWNLOAD_CHUNK_SIZE)
+            if not chunk:
+                break
+            handle.write(chunk)
+    return destination
 
 
 def _ensure_output_worker_state(window: base.MainWindow) -> None:
@@ -261,7 +274,7 @@ def show_video_output(self: base.MainWindow, item: dict[str, Any]) -> None:
 
     def fetch_video() -> dict[str, str]:
         if not local_path.exists() or local_path.stat().st_size != int(item.get("size") or -1):
-            self.client.download_file(path, local_path, timeout=900.0)
+            _download_file_fast(self.client, path, local_path, timeout=900.0)
         return {"relative": relative, "local_path": str(local_path)}
 
     def video_ready(task_id: str, result: object) -> None:
@@ -304,7 +317,7 @@ def download_current_output(self: base.MainWindow) -> None:
     destination = Path(folder) / str(item.get("name") or Path(str(item.get("relative_path"))).name)
 
     def download() -> str:
-        return str(self.client.download_file(str(item.get("download_path")), destination))
+        return str(_download_file_fast(self.client, str(item.get("download_path")), destination))
 
     def succeeded(task_id: str, result: object) -> None:
         if task_id != self.output_download_task_id:
@@ -328,21 +341,17 @@ def download_all_outputs(self: base.MainWindow) -> None:
     folder = QFileDialog.getExistingDirectory(self, "Download all listed outputs to folder")
     if not folder:
         return
-    destination_root = Path(folder)
-    files = [dict(item) for item in self.output_files]
+    kind = self.outputs_kind.currentText()
+    destination = Path(folder) / f"{kind}_outputs.zip"
 
     def download_all() -> str:
-        for item in files:
-            relative = Path(str(item.get("relative_path") or item.get("name")))
-            destination = destination_root / str(item.get("source") or "output") / relative
-            self.client.download_file(str(item.get("download_path")), destination)
-        return str(destination_root)
+        return str(_download_file_fast(self.client, f"/outputs/{kind}/zip", destination, timeout=1800.0))
 
     def succeeded(task_id: str, result: object) -> None:
         if task_id != self.output_download_task_id:
             return
-        self.output_status.setText(f"Downloaded {len(files)} file(s) to {result}")
-        self.log(f"downloaded {len(files)} output file(s) to {result}")
+        self.output_status.setText(f"Downloaded ZIP to {result}")
+        self.log(f"downloaded {kind} outputs ZIP to {result}")
 
     def failed(task_id: str, error: str) -> None:
         if task_id != self.output_download_task_id:
@@ -350,7 +359,7 @@ def download_all_outputs(self: base.MainWindow) -> None:
         self.output_status.setText(f"download all failed: {error}")
         self.log(f"download all failed: {error}")
 
-    self.output_download_task_id = _start_output_task(self, f"Downloading {len(files)} file(s)...", download_all, succeeded, failed)
+    self.output_download_task_id = _start_output_task(self, f"Downloading {kind} ZIP...", download_all, succeeded, failed)
 
 
 def check_connection(self: base.MainWindow) -> None:
