@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import json
-import threading
-import time
-import urllib.error
-import urllib.request
 import asyncio
+import json
+import mimetypes
+import time
+import urllib.request
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -25,7 +24,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
-    QProgressBar,
     QPushButton,
     QSpinBox,
     QTabWidget,
@@ -36,6 +34,9 @@ from PySide6.QtWidgets import (
 
 DEFAULT_DRIVE_ROOT = "/content/drive/MyDrive/DeepLiveCamRemote"
 APP_STATE = Path.home() / ".deep_live_cam_remote_windows_app.json"
+REMOTE_PREFIXES = ("/content/", "/drive/")
+PHOTO_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".webp"}
+VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm"}
 
 
 @dataclass
@@ -80,21 +81,26 @@ def save_settings(settings: AppSettings) -> None:
 
 
 def is_local_path(path: str) -> bool:
-    """Check if a path is a local Windows path (not a remote Colab/Drive path)."""
     if not path:
         return False
-    # Windows absolute paths: C:\... or \\server\...
-    if len(path) >= 2 and path[1] == ':':
-        return True
-    if path.startswith('\\\\'):
-        return True
-    # Unix-style paths starting with /content or /drive are remote
-    if path.startswith('/content') or path.startswith('/drive'):
+    normalized = path.replace("\\", "/")
+    if normalized.startswith(REMOTE_PREFIXES):
         return False
-    # Relative paths on Windows
-    if Path(path).exists():
+    if len(path) >= 2 and path[1] == ":":
         return True
-    return False
+    if path.startswith("\\\\"):
+        return True
+    return Path(path).exists()
+
+
+def local_files(path: str, extensions: set[str], recursive: bool) -> list[Path]:
+    root = Path(path)
+    if root.is_file():
+        return [root] if root.suffix.lower() in extensions else []
+    if not root.is_dir():
+        raise FileNotFoundError(f"Local input folder does not exist: {path}")
+    iterator = root.rglob("*") if recursive else root.glob("*")
+    return sorted(p for p in iterator if p.is_file() and p.suffix.lower() in extensions)
 
 
 class ApiClient:
@@ -113,19 +119,15 @@ class ApiClient:
             return json.loads(response.read().decode("utf-8"))
 
     def upload_file(self, endpoint: str, file_path: Path, field_name: str = "file", timeout: float = 120.0) -> dict[str, Any]:
-        """Upload a single file using multipart/form-data."""
-        boundary = f"----WebKitFormBoundary{uuid.uuid4().hex[:16]}"
+        boundary = f"----DeepLiveCamBoundary{uuid.uuid4().hex}"
         content_type = f"multipart/form-data; boundary={boundary}"
-
-        filename = file_path.name
+        mime_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
         file_data = file_path.read_bytes()
-
         body = (
             f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'
-            f"Content-Type: application/octet-stream\r\n\r\n"
+            f'Content-Disposition: form-data; name="{field_name}"; filename="{file_path.name}"\r\n'
+            f"Content-Type: {mime_type}\r\n\r\n"
         ).encode("utf-8") + file_data + f"\r\n--{boundary}--\r\n".encode("utf-8")
-
         request = urllib.request.Request(
             self.settings.base_url + endpoint,
             data=body,
@@ -136,23 +138,20 @@ class ApiClient:
             return json.loads(response.read().decode("utf-8"))
 
     def upload_files(self, endpoint: str, file_paths: list[Path], field_name: str = "files", timeout: float = 300.0) -> dict[str, Any]:
-        """Upload multiple files using multipart/form-data."""
-        boundary = f"----WebKitFormBoundary{uuid.uuid4().hex[:16]}"
+        boundary = f"----DeepLiveCamBoundary{uuid.uuid4().hex}"
         content_type = f"multipart/form-data; boundary={boundary}"
-
         body_parts = []
         for file_path in file_paths:
-            filename = file_path.name
+            mime_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
             file_data = file_path.read_bytes()
-            part = (
-                f"--{boundary}\r\n"
-                f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'
-                f"Content-Type: application/octet-stream\r\n\r\n"
-            ).encode("utf-8") + file_data + b"\r\n"
-            body_parts.append(part)
-
+            body_parts.append(
+                (
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="{field_name}"; filename="{file_path.name}"\r\n'
+                    f"Content-Type: {mime_type}\r\n\r\n"
+                ).encode("utf-8") + file_data + b"\r\n"
+            )
         body = b"".join(body_parts) + f"--{boundary}--\r\n".encode("utf-8")
-
         request = urllib.request.Request(
             self.settings.base_url + endpoint,
             data=body,
@@ -163,9 +162,9 @@ class ApiClient:
             return json.loads(response.read().decode("utf-8"))
 
 
-def job_payload(settings: AppSettings, input_dir: str, output_dir: str) -> dict[str, Any]:
+def job_payload(settings: AppSettings, input_dir: str, output_dir: str, source_face: str | None = None) -> dict[str, Any]:
     return {
-        "source_face": settings.source_face,
+        "source_face": source_face or settings.source_face,
         "input_dir": input_dir,
         "output_dir": output_dir,
         "recursive": settings.recursive,
@@ -228,7 +227,7 @@ class LiveWorker(QThread):
                     if virtual_cam is None:
                         try:
                             import pyvirtualcam
-                            decoded = cv2.imdecode(__import__('numpy').frombuffer(reply, dtype=__import__('numpy').uint8), cv2.IMREAD_COLOR)
+                            decoded = cv2.imdecode(__import__("numpy").frombuffer(reply, dtype=__import__("numpy").uint8), cv2.IMREAD_COLOR)
                             h, w = decoded.shape[:2]
                             virtual_cam = pyvirtualcam.Camera(width=w, height=h, fps=20, device=self.settings.virtual_camera or None)
                             self.message.emit(f"virtual camera opened: {virtual_cam.device}")
@@ -301,17 +300,23 @@ class MainWindow(QMainWindow):
     def log(self, text: str) -> None:
         self.log_box.append(text)
 
-    def _browse_file(self, line_edit: QLineEdit, title: str, filter: str = "Images (*.png *.jpg *.jpeg *.bmp)") -> None:
-        """Open file dialog and set result to line edit."""
-        path, _ = QFileDialog.getOpenFileName(self, title, "", filter)
+    def _browse_file(self, line_edit: QLineEdit, title: str, file_filter: str = "Images (*.png *.jpg *.jpeg *.bmp *.webp)") -> None:
+        path, _ = QFileDialog.getOpenFileName(self, title, "", file_filter)
         if path:
             line_edit.setText(path)
 
     def _browse_folder(self, line_edit: QLineEdit, title: str) -> None:
-        """Open folder dialog and set result to line edit."""
         path = QFileDialog.getExistingDirectory(self, title)
         if path:
             line_edit.setText(path)
+
+    def _path_row(self, line_edit: QLineEdit, browse_callback: Any) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.addWidget(line_edit)
+        browse = QPushButton("Browse...")
+        browse.clicked.connect(browse_callback)
+        row.addWidget(browse)
+        return row
 
     def sync_settings(self) -> None:
         self.settings.host = self.host.text().strip()
@@ -370,11 +375,7 @@ class MainWindow(QMainWindow):
         box = QGroupBox("Common options")
         form = QFormLayout(box)
         self.source_face = QLineEdit(self.settings.source_face)
-        source_row = QHBoxLayout()
-        source_row.addWidget(self.source_face)
-        source_browse = QPushButton("Browse...")
-        source_browse.clicked.connect(lambda: self._browse_file(self.source_face, "Select source face image"))
-        source_row.addWidget(source_browse)
+        source_row = self._path_row(self.source_face, lambda: self._browse_file(self.source_face, "Select source face image"))
         self.recursive = QCheckBox(); self.recursive.setChecked(self.settings.recursive)
         self.overwrite = QCheckBox(); self.overwrite.setChecked(self.settings.overwrite)
         self.skip_processed = QCheckBox(); self.skip_processed.setChecked(self.settings.skip_processed)
@@ -394,7 +395,8 @@ class MainWindow(QMainWindow):
         form = QFormLayout()
         self.photos_input = QLineEdit(self.settings.photos_input)
         self.photos_output = QLineEdit(self.settings.photos_output)
-        form.addRow("Photos input path", self.photos_input)
+        photos_input_row = self._path_row(self.photos_input, lambda: self._browse_folder(self.photos_input, "Select photos input folder"))
+        form.addRow("Photos input path", photos_input_row)
         form.addRow("Photos output path", self.photos_output)
         layout.addLayout(form)
         btn = QPushButton("Start photo batch")
@@ -411,7 +413,8 @@ class MainWindow(QMainWindow):
         self.max_fps = QDoubleSpinBox(); self.max_fps.setRange(1, 120); self.max_fps.setValue(self.settings.max_fps)
         self.max_width = QSpinBox(); self.max_width.setRange(64, 4096); self.max_width.setValue(self.settings.max_width)
         self.quality = QSpinBox(); self.quality.setRange(0, 51); self.quality.setValue(self.settings.quality)
-        form.addRow("Videos input path", self.videos_input)
+        videos_input_row = self._path_row(self.videos_input, lambda: self._browse_folder(self.videos_input, "Select videos input folder"))
+        form.addRow("Videos input path", videos_input_row)
         form.addRow("Videos output path", self.videos_output)
         form.addRow("Max FPS", self.max_fps)
         form.addRow("Max width", self.max_width)
@@ -463,8 +466,38 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.log(f"health failed: {exc}")
 
+    def upload_source_if_needed(self) -> str:
+        source_face = self.settings.source_face
+        if not is_local_path(source_face):
+            return source_face
+        source_path = Path(source_face)
+        if not source_path.is_file():
+            raise FileNotFoundError(f"Local source face does not exist: {source_face}")
+        self.log(f"uploading local source face: {source_path}")
+        response = self.client.upload_file("/upload/file?kind=source", source_path)
+        remote_path = str(response.get("path") or source_face)
+        self.log(f"source uploaded to: {remote_path}")
+        return remote_path
+
+    def upload_input_if_needed(self, kind: str, input_path: str, output_path: str) -> tuple[str, str]:
+        if not is_local_path(input_path):
+            return input_path, output_path
+        extensions = PHOTO_EXTENSIONS if kind == "photos" else VIDEO_EXTENSIONS
+        files = local_files(input_path, extensions, self.settings.recursive)
+        if not files:
+            raise FileNotFoundError(f"No supported {kind} files found in local path: {input_path}")
+        endpoint = f"/upload/{kind}"
+        self.log(f"uploading {len(files)} local {kind} file(s)")
+        response = self.client.upload_files(endpoint, files, timeout=600.0)
+        remote_input = str(response.get("input_dir") or input_path)
+        remote_output = output_path
+        if is_local_path(output_path):
+            remote_output = str(response.get("output_dir") or output_path)
+            self.log(f"local output path is not reachable from Colab; using: {remote_output}")
+        self.log(f"{kind} uploaded to: {remote_input}")
+        return remote_input, remote_output
+
     def start_job(self, endpoint: str, payload: dict[str, Any]) -> None:
-        self.sync_settings()
         try:
             response = self.client.request_json("POST", endpoint, payload)
             self.active_job_id = response.get("job_id")
@@ -482,11 +515,23 @@ class MainWindow(QMainWindow):
 
     def start_photos(self) -> None:
         self.sync_settings()
-        self.start_job("/jobs/photos", job_payload(self.settings, self.settings.photos_input, self.settings.photos_output))
+        self.tabs.setCurrentWidget(self.log_box)
+        try:
+            source_face = self.upload_source_if_needed()
+            input_dir, output_dir = self.upload_input_if_needed("photos", self.settings.photos_input, self.settings.photos_output)
+            self.start_job("/jobs/photos", job_payload(self.settings, input_dir, output_dir, source_face))
+        except Exception as exc:
+            self.log(f"photo batch failed before start: {exc}")
 
     def start_videos(self) -> None:
         self.sync_settings()
-        self.start_job("/jobs/videos", job_payload(self.settings, self.settings.videos_input, self.settings.videos_output))
+        self.tabs.setCurrentWidget(self.log_box)
+        try:
+            source_face = self.upload_source_if_needed()
+            input_dir, output_dir = self.upload_input_if_needed("videos", self.settings.videos_input, self.settings.videos_output)
+            self.start_job("/jobs/videos", job_payload(self.settings, input_dir, output_dir, source_face))
+        except Exception as exc:
+            self.log(f"video batch failed before start: {exc}")
 
     def cancel_job(self) -> None:
         self.sync_settings()
@@ -525,7 +570,6 @@ class MainWindow(QMainWindow):
 def main() -> int:
     app = QApplication([])
 
-    # Load dark theme stylesheet
     qss_path = Path(__file__).parent / "dark_theme.qss"
     if qss_path.exists():
         app.setStyleSheet(qss_path.read_text(encoding="utf-8"))
